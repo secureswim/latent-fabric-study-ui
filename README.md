@@ -44,7 +44,7 @@ Keep the participant display on the projector or participant machine. Keep the r
 - Pausing stops active timers; resuming continues from the accumulated value.
 - The storage indicator reports **Stored**, **Saving**, or **Local backup**.
 
-The hosted app uses Cloudflare D1 through the Sites platform. The browser copy is a recovery cache, not the authoritative hosted record.
+The app uses Cloudflare D1 directly. During local development, Wrangler stores an emulated D1 database under `.wrangler/state/`. In production, every client uses the D1 database bound as `DB`. The browser copy is a recovery cache, not the authoritative record.
 
 ## Participant prompt behaviour
 
@@ -61,7 +61,41 @@ The hosted app uses Cloudflare D1 through the Sites platform. The browser copy i
 - Do not introduce gesture demonstrations, arrows, sliders, hand diagrams, or mouse instructions.
 - Orange indicates live interaction, blue indicates stored structures, and green is reserved for final selection.
 
-## Production build
+## Deploy directly to Cloudflare Workers
+
+Requirements: a free Cloudflare account and Wrangler authentication.
+
+On Windows PowerShell, use `pnpm.cmd` if `pnpm` is not directly available.
+
+1. Authenticate Wrangler:
+
+```bash
+pnpm exec wrangler login
+```
+
+2. Create the production D1 database:
+
+```bash
+pnpm exec wrangler d1 create latent-fabric-study-db
+```
+
+3. Copy the returned database ID into `wrangler.jsonc`, replacing the all-zero placeholder while leaving the binding name as `DB`.
+
+4. Apply the schema to the remote database:
+
+```bash
+pnpm db:migrate:remote
+```
+
+5. Deploy the Worker:
+
+```bash
+pnpm deploy
+```
+
+Wrangler prints the deployed `workers.dev` URL. Use `/researcher` on the researcher machine and `/` on the participant machine. The production database starts empty; local `.wrangler` data is not uploaded automatically.
+
+## Production build only
 
 ```bash
 pnpm build
