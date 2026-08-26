@@ -104,7 +104,21 @@ export default function Home() {
     const channel = new BroadcastChannel(CHANNEL_NAME);
     channel.onmessage = e => e.data?.type === 'state' && setState(e.data.state);
     const storage = (e: StorageEvent) => e.key === STORAGE_KEY && e.newValue && setState(JSON.parse(e.newValue));
-    window.addEventListener('storage', storage); return () => { channel.close(); window.removeEventListener('storage', storage); };
+    const syncHostedState = async () => {
+      try {
+        const response = await fetch('/api/sessions?live=1', { cache: 'no-store' });
+        if (!response.ok) return;
+        const payload = await response.json();
+        if (payload.session?.stateJson) {
+          const hosted = JSON.parse(payload.session.stateJson) as StudyState;
+          setState(hosted);
+          localStorage.setItem(STORAGE_KEY, JSON.stringify(hosted));
+        }
+      } catch { /* The local same-browser channel remains available offline. */ }
+    };
+    syncHostedState();
+    const hostedTimer = window.setInterval(syncHostedState, 700);
+    window.addEventListener('storage', storage); return () => { channel.close(); window.clearInterval(hostedTimer); window.removeEventListener('storage', storage); };
   }, []);
   const id = designId(state.designIndex);
   const dims = [820 + state.designIndex*9%260, 730 + state.designIndex*7%210, 960 + state.designIndex*13%280, 390 + state.designIndex*3%80];

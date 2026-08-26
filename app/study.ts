@@ -42,6 +42,8 @@ export const SEQUENCES: Record<string, number[]> = {
 };
 
 export type StudyState = {
+  sessionId: string;
+  setupComplete: boolean;
   participantId: string;
   researcherInitials: string;
   sequence: keyof typeof SEQUENCES;
@@ -54,11 +56,18 @@ export type StudyState = {
   locked: string[];
   recording: boolean;
   sessionStartedAt: number;
+  sessionAccumulatedMs: number;
+  sessionRunStartedAt: number;
+  trialStartedAt: number;
+  trialAccumulatedMs: number;
+  trialRunning: boolean;
   overlayVisible: boolean;
   studyNeutralMode: boolean;
 };
 
 export const DEFAULT_STATE: StudyState = {
+  sessionId: '',
+  setupComplete: false,
   participantId: 'P07',
   researcherInitials: '',
   sequence: 'A',
@@ -73,6 +82,11 @@ export const DEFAULT_STATE: StudyState = {
   // Keep the server-rendered and first client-rendered snapshots identical.
   // The researcher console assigns the real start time after hydration.
   sessionStartedAt: 0,
+  sessionAccumulatedMs: 0,
+  sessionRunStartedAt: 0,
+  trialStartedAt: 0,
+  trialAccumulatedMs: 0,
+  trialRunning: false,
   overlayVisible: true,
   studyNeutralMode: true,
 };

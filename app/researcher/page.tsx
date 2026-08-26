@@ -1,76 +1,166 @@
 'use client';
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { CHANNEL_NAME, currentReferent, DEFAULT_STATE, designId, LOG_KEY, REFERENTS, ResponseKind, SEQUENCES, STORAGE_KEY, StudyState } from '../study';
 
-type TrialLog = Record<string, string | number | boolean>;
-const emptyLog = (): TrialLog => ({ handCount:'', contactType:'', initialLocation:'', finalLocation:'', direction:'', pathShape:'', distance:'', surfaceArea:'', zDepth:'', maxDepthDuration:'', deformationRate:'', releasePattern:'', elicitationTime:'', gestureDuration:'', repetitions:1, hesitation:false, discreteContinuous:'', staticDynamic:'', singleMultiTouch:'', spatialNonSpatial:'', deformationPlanar:'', symbolicDirect:'', naturalness:0, confidence:0, explanation:'', expectedResponse:'', researcherNotes:'' });
+type TrialLog = Record<string, string | number | boolean> & {
+  trialDurationMs: number;
+  trialStartedAt: number;
+  status: string;
+};
 
-const responseButtons: [string, ResponseKind][] = [['Traverse →','navigate'],['Nearby variation','local'],['Distant variation','broad'],['Broaden field','zoom-out'],['Save current state','anchor'],['Restore anchor','return-anchor'],['Create branch','branch'],['Lock component','lock'],['Unlock component','unlock'],['Undo','undo'],['Show comparison','compare'],['Show history','history'],['Reset','reset'],['Commit selection','select'],['Uncertain contact','uncertain']];
+type StoredSession = {
+  id: string; participantId: string; sequence: string; researcherInitials: string;
+  status: string; currentTrial: number; stateJson: string; startedAt: number;
+  elapsedMs: number; completedAt?: number | null; updatedAt: number;
+};
 
-function Field({ label, value, onChange, type='text' }: { label:string; value:string|number|boolean; onChange:(v:string|number|boolean)=>void; type?:string }) { return <label className="form-field"><span>{label}</span>{type==='checkbox'?<input type="checkbox" checked={Boolean(value)} onChange={e=>onChange(e.target.checked)}/>:<input type={type} value={String(value)} onChange={e=>onChange(type==='number'?Number(e.target.value):e.target.value)}/>}</label>; }
-function SelectField({ label, value, options, onChange }: { label:string;value:string|number|boolean;options:string[];onChange:(v:string)=>void }) { return <label className="form-field"><span>{label}</span><select value={String(value)} onChange={e=>onChange(e.target.value)}><option value="">—</option>{options.map(o=><option key={o}>{o}</option>)}</select></label>; }
+const emptyLog = (): TrialLog => ({
+  handCount:'', contactType:'', initialLocation:'', finalLocation:'', direction:'', pathShape:'', distance:'', surfaceArea:'',
+  zDepth:'', maxDepthDuration:'', deformationRate:'', releasePattern:'', elicitationTime:'', gestureDuration:'', repetitions:1,
+  hesitation:false, discreteContinuous:'', staticDynamic:'', singleMultiTouch:'', spatialNonSpatial:'', deformationPlanar:'',
+  symbolicDirect:'', naturalness:0, confidence:0, explanation:'', expectedResponse:'', researcherNotes:'',
+  trialDurationMs:0, trialStartedAt:0, status:'not-started',
+});
+
+function formatDuration(ms:number){const total=Math.max(0,Math.floor(ms/1000));return `${String(Math.floor(total/60)).padStart(2,'0')}:${String(total%60).padStart(2,'0')}`;}
+function Field({label,value,onChange,type='text'}:{label:string;value:string|number|boolean;onChange:(v:string|number|boolean)=>void;type?:string}){return <label className="form-field"><span>{label}</span>{type==='checkbox'?<input type="checkbox" checked={Boolean(value)} onChange={e=>onChange(e.target.checked)}/>:<input type={type} value={String(value)} onChange={e=>onChange(type==='number'?Number(e.target.value):e.target.value)}/>}</label>}
+function SelectField({label,value,options,onChange}:{label:string;value:string|number|boolean;options:string[];onChange:(v:string)=>void}){return <label className="form-field"><span>{label}</span><select value={String(value)} onChange={e=>onChange(e.target.value)}><option value="">—</option>{options.map(o=><option key={o}>{o}</option>)}</select></label>}
 
 export default function ResearcherPage(){
   const [state,setStateRaw]=useState<StudyState>(DEFAULT_STATE);
   const [log,setLog]=useState<TrialLog>(emptyLog());
   const [logs,setLogs]=useState<Record<string,TrialLog>>({});
-  const [tab,setTab]=useState<'observe'|'session'|'interview'|'summary'>('observe');
+  const [recent,setRecent]=useState<StoredSession[]>([]);
   const [now,setNow]=useState(0);
+  const [savedAt,setSavedAt]=useState(0);
+  const [storageState,setStorageState]=useState<'idle'|'saving'|'saved'|'offline'>('idle');
+  const [setup,setSetup]=useState({participantId:'',sequence:'A',researcherInitials:''});
   const channel=useRef<BroadcastChannel|null>(null);
+  const stateRef=useRef(state); const logRef=useRef(log); const logsRef=useRef(logs);
+  const remoteTimer=useRef<number|undefined>(undefined);
+
+  const publishState=(next:StudyState)=>{
+    stateRef.current=next; setStateRaw(next); localStorage.setItem(STORAGE_KEY,JSON.stringify(next));
+    channel.current?.postMessage({type:'state',state:next});
+  };
+
+  const sessionElapsed=(s=stateRef.current,at=Date.now())=>s.sessionAccumulatedMs+(s.recording&&s.sessionRunStartedAt?at-s.sessionRunStartedAt:0);
+  const trialElapsed=(s=stateRef.current,l=logRef.current,at=Date.now())=>Number(l.trialDurationMs||0)+(s.trialRunning&&s.trialStartedAt?at-s.trialStartedAt:0);
+
+  const loadRecent=async()=>{try{const response=await fetch('/api/sessions',{cache:'no-store'});if(response.ok)setRecent((await response.json()).sessions||[]);}catch{setStorageState('offline')}};
+
+  const persistSnapshot=async(status='draft',providedLog?:TrialLog,providedState?:StudyState)=>{
+    const s=providedState||stateRef.current; if(!s.sessionId)return;
+    const l=providedLog||logRef.current; const ref=currentReferent(s);
+    setStorageState('saving');
+    try{
+      const response=await fetch('/api/sessions',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({
+        action:'autosave',sessionId:s.sessionId,sessionStatus:status==='session-complete'?'completed':s.recording?'active':'paused',
+        currentTrial:s.currentTrial,state:s,elapsedMs:sessionElapsed(s),trial:{trialNumber:s.currentTrial+1,referentId:ref.id,referentLabel:ref.label,
+        status:status==='completed'?'completed':l.status,data:l,durationMs:trialElapsed(s,l),startedAt:l.trialStartedAt||s.trialStartedAt||0}
+      })});
+      if(!response.ok)throw new Error('save failed');setStorageState('saved');setSavedAt(Date.now());
+    }catch{setStorageState('offline')}
+  };
+
+  const queueRemoteSave=(nextLog:TrialLog,nextState=stateRef.current)=>{
+    if(remoteTimer.current)window.clearTimeout(remoteTimer.current);
+    remoteTimer.current=window.setTimeout(()=>persistSnapshot('draft',nextLog,nextState),650);
+  };
+
   useEffect(()=>{
-    const saved=localStorage.getItem(STORAGE_KEY);
-    if(saved){
-      const restored=JSON.parse(saved) as StudyState;
-      const hydrated={...restored,sessionStartedAt:restored.sessionStartedAt||Date.now()};
-      setStateRaw(hydrated);
-      localStorage.setItem(STORAGE_KEY,JSON.stringify(hydrated));
-    }else{
-      const started={...DEFAULT_STATE,sessionStartedAt:Date.now()};
-      setStateRaw(started);
-      localStorage.setItem(STORAGE_KEY,JSON.stringify(started));
-    }
-    const savedLogs=localStorage.getItem(LOG_KEY);if(savedLogs)setLogs(JSON.parse(savedLogs));
     channel.current=new BroadcastChannel(CHANNEL_NAME);
-    setNow(Date.now());
-    const timer=window.setInterval(()=>setNow(Date.now()),1000);
-    return()=>{window.clearInterval(timer);channel.current?.close();};
+    const savedState=localStorage.getItem(STORAGE_KEY);const savedLogs=localStorage.getItem(LOG_KEY);
+    if(savedState){const restored={...DEFAULT_STATE,...JSON.parse(savedState)} as StudyState;stateRef.current=restored;setStateRaw(restored);if(savedLogs){const parsed=JSON.parse(savedLogs);logsRef.current=parsed;setLogs(parsed);const selected=parsed[String(restored.currentTrial)]||emptyLog();logRef.current=selected;setLog(selected)}}
+    loadRecent();setNow(Date.now());const clock=window.setInterval(()=>setNow(Date.now()),1000);
+    const backup=window.setInterval(()=>{if(stateRef.current.sessionId)persistSnapshot('draft')},10000);
+    return()=>{window.clearInterval(clock);window.clearInterval(backup);if(remoteTimer.current)window.clearTimeout(remoteTimer.current);channel.current?.close()};
   },[]);
-  const setState=(next:StudyState|((s:StudyState)=>StudyState))=>setStateRaw(prev=>{const value=typeof next==='function'?next(prev):next;localStorage.setItem(STORAGE_KEY,JSON.stringify(value));channel.current?.postMessage({type:'state',state:value});return value;});
-  const ref=currentReferent(state); const elapsed=now&&state.sessionStartedAt?Math.max(0,now-state.sessionStartedAt):0; const elapsedText=`${String(Math.floor(elapsed/60000)).padStart(2,'0')}:${String(Math.floor(elapsed/1000)%60).padStart(2,'0')}`;
-  const updateLog=(k:string,v:string|number|boolean)=>setLog(l=>({...l,[k]:v}));
-  const saveLog=()=>{const enriched={...log,participantId:state.participantId,sequence:state.sequence,trialNumber:state.currentTrial+1,referentId:ref.id,referentLabel:ref.label,designId:designId(state.designIndex),savedAt:new Date().toISOString()};const next={...logs,[String(state.currentTrial)]:enriched};setLogs(next);localStorage.setItem(LOG_KEY,JSON.stringify(next));};
-  const trigger=(response:ResponseKind)=>{setState(s=>{let anchors=s.anchors,locked=s.locked,branch=s.branch,designIndex=s.designIndex; if(response==='anchor'&&!anchors.includes(designIndex))anchors=[...anchors,designIndex];if(response==='lock'&&!locked.includes('Backrest'))locked=[...locked,'Backrest'];if(response==='unlock')locked=[];if(response==='branch')branch=`b${Number(s.branch.slice(1)||0)+1}`;if(['navigate','broad','local','zoom-out'].includes(response))designIndex=(designIndex+({navigate:2,broad:9,local:1,'zoom-out':6} as Record<string,number>)[response])%28;return{...s,response,screen:'responding',anchors,locked,branch,designIndex,overlayVisible:false};});window.setTimeout(()=>setState(s=>({...s,screen:'response-complete'})),850);};
-  const show=(screen:StudyState['screen'],overlayVisible=true)=>setState(s=>({...s,screen,overlayVisible,response:screen==='trial'?'idle':s.response}));
-  const nextTrial=()=>{saveLog();setState(s=>({...s,currentTrial:Math.min(14,s.currentTrial+1),screen:'trial',response:'idle',overlayVisible:true}));setLog(logs[String(Math.min(14,state.currentTrial+1))]||emptyLog());};
-  const setRating=(key:'naturalness'|'confidence',v:number)=>updateLog(key,v);
-  const exportData=(kind:'json'|'csv')=>{const rows=Object.values(logs);let text:string,type:string,name:string;if(kind==='json'){text=JSON.stringify({session:state,trials:rows},null,2);type='application/json';name=`${state.participantId}-latent-fabric.json`;}else{const keys=Object.keys(rows[0]||{});text=[keys.join(','),...rows.map(r=>keys.map(k=>`"${String(r[k]??'').replaceAll('"','""')}"`).join(','))].join('\n');type='text/csv';name=`${state.participantId}-latent-fabric.csv`;}const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([text],{type}));a.download=name;a.click();URL.revokeObjectURL(a.href);};
-  const scores=useMemo(()=>Object.values(logs).map(l=>({n:Number(l.naturalness)||0,c:Number(l.confidence)||0})),[logs]);
-  return <main className="researcher-app">
-    <header className="researcher-header"><div><b>LATENT FABRIC</b><span>WIZARD-OF-OZ CONSOLE</span></div><div className="session-readout"><strong>{state.participantId} · MAIN ELICITATION</strong><span>TRIAL {String(state.currentTrial+1).padStart(2,'0')} / 15</span><span>{elapsedText}</span><span className={state.recording?'recording':''}>{state.recording?'● RECORDING':'Ⅱ PAUSED'}</span></div></header>
-    <nav className="researcher-tabs">{(['observe','session','interview','summary'] as const).map(t=><button className={tab===t?'active':''} onClick={()=>setTab(t)} key={t}>{t.toUpperCase()}</button>)}<a href="/" target="_blank">OPEN PARTICIPANT DISPLAY ↗</a></nav>
-    {tab==='observe'&&<div className="researcher-grid">
-      <aside className="trial-list"><div className="console-title">TRIAL ORDER · SEQUENCE {state.sequence}</div>{SEQUENCES[state.sequence].map((ri,i)=><button key={i} className={`${i===state.currentTrial?'active':''} ${logs[String(i)]?'done':''}`} onClick={()=>{saveLog();setState(s=>({...s,currentTrial:i,screen:'trial',response:'idle',overlayVisible:true}));setLog(logs[String(i)]||emptyLog());}}><span>{String(i+1).padStart(2,'0')}</span><b>{REFERENTS[ri].label}</b><small>{REFERENTS[ri].tier}</small></button>)}</aside>
-      <section className="control-stack">
-        <div className="referent-card"><div className="referent-meta"><span>CURRENT REFERENT · TIER {ref.tier}</span><strong>{ref.label}</strong></div><p>Participant sees: “{ref.prompt}”</p></div>
-        <div className="workflow-card"><div className="console-title">TRIAL WORKFLOW</div><div className="workflow-grid"><button onClick={()=>show('trial')}>START TRIAL</button><button onClick={()=>show('captured')}>MARK FIRST CAPTURED</button><button onClick={()=>show('captured',false)}>MARK REPEAT CAPTURED</button><button className="primary-trigger" onClick={()=>trigger((ref.id==='explore-broadly'?'broad':ref.id==='refine-locally'?'local':ref.id==='anchor'?'anchor':ref.id==='return-anchor'?'return-anchor':ref.id==='branch'?'branch':ref.id==='lock'?'lock':ref.id==='select'?'select':ref.id) as ResponseKind)}>TRIGGER RESPONSE</button><button onClick={()=>show('question-why')}>WHY QUESTION</button><button onClick={()=>show('question-expect')}>EXPECTATION QUESTION</button><button onClick={()=>show('rating-naturalness')}>NATURALNESS</button><button onClick={()=>show('rating-confidence')}>CONFIDENCE</button></div></div>
-        <div className="response-card"><div className="console-title">MOCK RESPONSE PALETTE</div><div className="response-grid">{responseButtons.map(([label,r])=><button onClick={()=>trigger(r)} key={r}>{label}</button>)}</div></div>
-        <div className="transport"><button onClick={()=>setState(s=>({...s,currentTrial:Math.max(0,s.currentTrial-1)}))}>← PREVIOUS</button><button onClick={()=>setState(s=>({...s,recording:!s.recording}))}>{state.recording?'PAUSE SESSION':'RESUME SESSION'}</button><button className="next" onClick={nextTrial}>SAVE + NEXT TRIAL →</button></div>
+
+  const storeDraft=(nextLog:TrialLog,trial=stateRef.current.currentTrial)=>{
+    logRef.current=nextLog;setLog(nextLog);
+    const nextLogs={...logsRef.current,[String(trial)]:nextLog};logsRef.current=nextLogs;setLogs(nextLogs);localStorage.setItem(LOG_KEY,JSON.stringify(nextLogs));queueRemoteSave(nextLog);
+  };
+  const updateLog=(key:string,value:string|number|boolean)=>storeDraft({...logRef.current,[key]:value});
+
+  const beginStudy=async()=>{
+    if(!setup.participantId.trim())return;
+    const at=Date.now();const provisional:StudyState={...DEFAULT_STATE,setupComplete:true,participantId:setup.participantId.trim(),researcherInitials:setup.researcherInitials.trim(),sequence:setup.sequence as keyof typeof SEQUENCES,screen:'trial',currentTrial:0,recording:true,sessionStartedAt:at,sessionRunStartedAt:at,overlayVisible:true};
+    setStorageState('saving');
+    try{
+      const response=await fetch('/api/sessions',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({action:'create',participantId:provisional.participantId,sequence:provisional.sequence,researcherInitials:provisional.researcherInitials,startedAt:at,state:provisional})});
+      if(!response.ok)throw new Error('create failed');const {id}=await response.json();const started={...provisional,sessionId:id};
+      const first=emptyLog();publishState(started);setLog(first);logRef.current=first;setLogs({});logsRef.current={};localStorage.setItem(LOG_KEY,'{}');setStorageState('saved');setSavedAt(Date.now());await persistSnapshot('draft',first,started);
+    }catch{setStorageState('offline')}
+  };
+
+  const resumeSession=async(id:string)=>{
+    setStorageState('saving');try{const response=await fetch(`/api/sessions?id=${encodeURIComponent(id)}`,{cache:'no-store'});if(!response.ok)throw new Error();const payload=await response.json();const restored={...DEFAULT_STATE,...JSON.parse(payload.session.stateJson),sessionId:id,setupComplete:true,recording:false,sessionRunStartedAt:0,trialRunning:false} as StudyState;
+      const restoredLogs:Record<string,TrialLog>={};for(const row of payload.trials||[])restoredLogs[String(row.trialNumber-1)]={...emptyLog(),...JSON.parse(row.draftJson),trialDurationMs:row.durationMs,status:row.status,trialStartedAt:row.startedAt||0};
+      logsRef.current=restoredLogs;setLogs(restoredLogs);localStorage.setItem(LOG_KEY,JSON.stringify(restoredLogs));const selected=restoredLogs[String(restored.currentTrial)]||emptyLog();logRef.current=selected;setLog(selected);publishState(restored);setStorageState('saved');setSavedAt(Date.now());
+    }catch{setStorageState('offline')}};
+
+  const selectTrial=async(index:number)=>{
+    const currentDuration=trialElapsed();const currentDraft={...logRef.current,trialDurationMs:currentDuration,status:logRef.current.status==='completed'?'completed':logRef.current.status==='not-started'?'not-started':'draft'};storeDraft(currentDraft);await persistSnapshot('draft',currentDraft);
+    const selected=logsRef.current[String(index)]||emptyLog();logRef.current=selected;setLog(selected);
+    const next={...stateRef.current,currentTrial:index,screen:'trial' as const,response:'idle' as const,overlayVisible:true,trialRunning:false,trialStartedAt:0,trialAccumulatedMs:Number(selected.trialDurationMs||0)};publishState(next);
+    await persistSnapshot('draft',selected,next);
+  };
+
+  const startTrial=()=>{
+    const at=Date.now();const startedLog={...logRef.current,status:'running',trialStartedAt:logRef.current.trialStartedAt||at};storeDraft(startedLog);
+    const started={...stateRef.current,screen:'trial' as const,response:'idle' as const,overlayVisible:false,trialRunning:true,trialStartedAt:at,trialAccumulatedMs:Number(startedLog.trialDurationMs||0)};publishState(started);persistSnapshot('draft',startedLog,started);
+  };
+
+  const trigger=()=>{
+    const ref=currentReferent(stateRef.current);const response=(ref.id==='explore-broadly'?'broad':ref.id==='refine-locally'?'local':ref.id==='zoom-out'?'zoom-out':ref.id==='anchor'?'anchor':ref.id==='return-anchor'?'return-anchor':ref.id==='branch'?'branch':ref.id==='lock'?'lock':ref.id==='unlock'?'unlock':ref.id==='undo'?'undo':ref.id==='compare'?'compare':ref.id==='reset'?'reset':ref.id==='history'?'history':ref.id==='switch-branch'?'timeline-branch':ref.id==='select'?'select':'navigate') as ResponseKind;
+    const s=stateRef.current;let anchors=s.anchors,locked=s.locked,branch=s.branch,designIndex=s.designIndex;if(response==='anchor'&&!anchors.includes(designIndex))anchors=[...anchors,designIndex];if(response==='lock'&&!locked.includes('Backrest'))locked=[...locked,'Backrest'];if(response==='unlock')locked=[];if(response==='branch')branch=`b${Number(s.branch.slice(1)||0)+1}`;if(['navigate','broad','local','zoom-out'].includes(response))designIndex=(designIndex+({navigate:2,broad:9,local:1,'zoom-out':6} as Record<string,number>)[response])%28;
+    const responding={...s,response,screen:'responding' as const,overlayVisible:false,anchors,locked,branch,designIndex};publishState(responding);persistSnapshot('draft',logRef.current,responding);window.setTimeout(()=>{const completed={...stateRef.current,screen:'response-complete' as const};publishState(completed);persistSnapshot('draft',logRef.current,completed)},850);
+  };
+
+  const pauseResume=()=>{
+    const at=Date.now();const s=stateRef.current;
+    if(s.recording){const duration=trialElapsed(s,logRef.current,at);const draft={...logRef.current,trialDurationMs:duration,status:s.trialRunning?'paused':logRef.current.status};storeDraft(draft);const paused={...s,recording:false,sessionAccumulatedMs:sessionElapsed(s,at),sessionRunStartedAt:0,trialRunning:false,trialStartedAt:0};publishState(paused);persistSnapshot('draft',draft,paused)}
+    else{const resumed={...s,recording:true,sessionRunStartedAt:at,trialRunning:logRef.current.status==='paused',trialStartedAt:logRef.current.status==='paused'?at:0};publishState(resumed);storeDraft({...logRef.current,status:logRef.current.status==='paused'?'running':logRef.current.status})}
+  };
+
+  const saveNext=async()=>{
+    const at=Date.now();const duration=trialElapsed(stateRef.current,logRef.current,at);const completed={...logRef.current,trialDurationMs:duration,status:'completed'};storeDraft(completed);const stopped={...stateRef.current,trialRunning:false,trialStartedAt:0,trialAccumulatedMs:duration};publishState(stopped);await persistSnapshot('completed',completed,stopped);
+    if(stopped.currentTrial>=14){const finished={...stopped,screen:'complete' as const,overlayVisible:true,recording:false,sessionAccumulatedMs:sessionElapsed(stopped,at),sessionRunStartedAt:0};publishState(finished);await persistSnapshot('session-complete',completed,finished);await loadRecent();return}
+    await selectTrial(stopped.currentTrial+1);
+  };
+
+  const exportSession=()=>{const payload={session:stateRef.current,trials:logsRef.current};const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([JSON.stringify(payload,null,2)],{type:'application/json'}));a.download=`${stateRef.current.participantId}-latent-fabric.json`;a.click();URL.revokeObjectURL(a.href)};
+  const newParticipant=()=>{const fresh={...DEFAULT_STATE};publishState(fresh);setLog(emptyLog());logRef.current=emptyLog();setLogs({});logsRef.current={};localStorage.removeItem(LOG_KEY);setSetup({participantId:'',sequence:'A',researcherInitials:stateRef.current.researcherInitials});loadRecent()};
+
+  const ref=currentReferent(state);const sessionTime=sessionElapsed(state,now||Date.now());const trialTime=trialElapsed(state,log,now||Date.now());
+
+  if(!state.setupComplete)return <SetupScreen setup={setup} setSetup={setSetup} beginStudy={beginStudy} recent={recent} resume={resumeSession} storageState={storageState}/>;
+
+  return <main className="researcher-app simple-console">
+    <header className="researcher-header"><div><b>LATENT FABRIC</b><span>GESTURE STUDY CONSOLE</span></div><div className="session-readout"><strong>{state.participantId} · SEQUENCE {state.sequence}</strong><span>STUDY <b>{formatDuration(sessionTime)}</b></span><span>TRIAL <b>{formatDuration(trialTime)}</b></span><span className={`storage-indicator ${storageState}`}>{storageState==='saving'?'◌ SAVING':storageState==='offline'?'△ LOCAL BACKUP':'● STORED'}</span></div></header>
+    <div className="single-console-grid">
+      <aside className="trial-list simple-trials"><div className="console-title">TRIALS · {Object.values(logs).filter(l=>l.status==='completed').length} / 15 COMPLETE</div>{SEQUENCES[state.sequence].map((ri,i)=><button key={i} className={`${i===state.currentTrial?'active':''} ${logs[String(i)]?.status==='completed'?'done':''}`} onClick={()=>selectTrial(i)}><span>{String(i+1).padStart(2,'0')}</span><b>{REFERENTS[ri].label}</b><small>{logs[String(i)]?.status==='completed'?'✓':logs[String(i)]?.status==='draft'||logs[String(i)]?.status==='paused'?'DRAFT':REFERENTS[ri].tier}</small></button>)}<div className="storage-card"><span>STUDY STORAGE</span><b>{storageState==='offline'?'Local backup active':'Durable autosave active'}</b><small>{savedAt?`Last saved ${new Date(savedAt).toLocaleTimeString()}`:'Waiting for first change'}</small><button onClick={exportSession}>EXPORT JSON</button>{state.screen==='complete'&&<button className="new-participant" onClick={newParticipant}>NEXT PARTICIPANT</button>}</div></aside>
+      <section className="study-controls">
+        <div className="referent-card"><div className="referent-meta"><span>TASK {String(state.currentTrial+1).padStart(2,'0')} / 15 · TIER {ref.tier}</span><strong>{ref.label}</strong></div><p>Participant prompt: “{ref.prompt}”</p><div className="task-timing"><span>TRIAL TIME</span><b>{formatDuration(trialTime)}</b><small>{state.trialRunning?'RUNNING':log.status==='completed'?'SAVED':'READY'}</small></div></div>
+        <div className="workflow-card simplified-workflow"><div className="console-title">TRIAL CONTROL</div><button className="start-trial" disabled={state.trialRunning||log.status==='completed'} onClick={startTrial}>{log.status==='completed'?'TRIAL SAVED':state.trialRunning?'TRIAL IN PROGRESS':'START TRIAL'}</button><button className="primary-trigger" disabled={!state.trialRunning&&log.status!=='running'} onClick={trigger}>TRIGGER RESPONSE</button><p>Selecting a task shows its prompt to the participant. Starting the trial dismisses the prompt and begins timing.</p></div>
+        <div className="transport"><button onClick={()=>selectTrial(Math.max(0,state.currentTrial-1))}>← PREVIOUS</button><button onClick={pauseResume}>{state.recording?'PAUSE SESSION':'RESUME SESSION'}</button><button className="next" onClick={saveNext}>{state.currentTrial===14?'SAVE PARTICIPANT RESULTS':'SAVE + NEXT TRIAL →'}</button></div>
       </section>
-      <section className="observation-panel"><div className="console-title">GESTURE OBSERVATION · MANUAL LOG</div>
-        <fieldset><legend>GEOMETRY</legend><SelectField label="Hands" value={log.handCount} options={['One hand','Two hands']} onChange={v=>updateLog('handCount',v)}/><SelectField label="Contact" value={log.contactType} options={['Finger','Multiple fingers','Palm','Whole hand']} onChange={v=>updateLog('contactType',v)}/><div className="two"><Field label="Initial region" value={log.initialLocation} onChange={v=>updateLog('initialLocation',v)}/><Field label="Final region" value={log.finalLocation} onChange={v=>updateLog('finalLocation',v)}/></div><div className="two"><SelectField label="Direction" value={log.direction} options={['Left','Right','Forward','Back','Inward','Outward','None']} onChange={v=>updateLog('direction',v)}/><SelectField label="Path" value={log.pathShape} options={['Linear','Curved','Circular','Irregular','Stationary']} onChange={v=>updateLog('pathShape',v)}/></div></fieldset>
-        <fieldset><legend>DEFORMATION + TIME</legend><div className="three"><Field label="Z depth mm" type="number" value={log.zDepth} onChange={v=>updateLog('zDepth',v)}/><Field label="Max hold s" type="number" value={log.maxDepthDuration} onChange={v=>updateLog('maxDepthDuration',v)}/><SelectField label="Rate" value={log.deformationRate} options={['Slow','Moderate','Fast']} onChange={v=>updateLog('deformationRate',v)}/></div><div className="three"><Field label="Elicitation s" type="number" value={log.elicitationTime} onChange={v=>updateLog('elicitationTime',v)}/><Field label="Duration s" type="number" value={log.gestureDuration} onChange={v=>updateLog('gestureDuration',v)}/><Field label="Repetitions" type="number" value={log.repetitions} onChange={v=>updateLog('repetitions',v)}/></div><Field label="Hesitation observed" type="checkbox" value={log.hesitation} onChange={v=>updateLog('hesitation',v)}/></fieldset>
-        <fieldset><legend>BEHAVIOURAL STRUCTURE</legend><div className="two"><SelectField label="Temporal" value={log.discreteContinuous} options={['Discrete','Continuous']} onChange={v=>updateLog('discreteContinuous',v)}/><SelectField label="Motion" value={log.staticDynamic} options={['Static','Dynamic']} onChange={v=>updateLog('staticDynamic',v)}/><SelectField label="Touch" value={log.singleMultiTouch} options={['Single-touch','Multitouch']} onChange={v=>updateLog('singleMultiTouch',v)}/><SelectField label="Spatial" value={log.spatialNonSpatial} options={['Spatial','Non-spatial']} onChange={v=>updateLog('spatialNonSpatial',v)}/><SelectField label="Modality" value={log.deformationPlanar} options={['Deformation-based','Planar','Mixed']} onChange={v=>updateLog('deformationPlanar',v)}/><SelectField label="Meaning" value={log.symbolicDirect} options={['Symbolic','Direct manipulation','Mixed']} onChange={v=>updateLog('symbolicDirect',v)}/></div></fieldset>
-        <fieldset><legend>SUBJECTIVE</legend><div className="score-row"><span>NATURALNESS</span>{[1,2,3,4,5].map(n=><button className={Number(log.naturalness)===n?'selected':''} onClick={()=>setRating('naturalness',n)} key={n}>{n}</button>)}</div><div className="score-row"><span>CONFIDENCE</span>{[1,2,3,4,5].map(n=><button className={Number(log.confidence)===n?'selected':''} onClick={()=>setRating('confidence',n)} key={n}>{n}</button>)}</div><label className="text-field"><span>Why this action?</span><textarea value={String(log.explanation)} onChange={e=>updateLog('explanation',e.target.value)}/></label><label className="text-field"><span>Expected response</span><textarea value={String(log.expectedResponse)} onChange={e=>updateLog('expectedResponse',e.target.value)}/></label><label className="text-field notes"><span>Researcher notes</span><textarea value={String(log.researcherNotes)} onChange={e=>updateLog('researcherNotes',e.target.value)}/></label></fieldset>
-      </section>
-    </div>}
-    {tab==='session'&&<Setup state={state} setState={setState} show={show}/>} 
-    {tab==='interview'&&<Interview show={show}/>} 
-    {tab==='summary'&&<section className="summary-panel"><div className="console-title">SESSION SUMMARY</div><div className="summary-cards"><div><span>TRIALS COMPLETED</span><b>{Object.keys(logs).length} / 15</b></div><div><span>AVG NATURALNESS</span><b>{scores.length?(scores.reduce((a,s)=>a+s.n,0)/scores.length).toFixed(1):'—'}</b></div><div><span>AVG CONFIDENCE</span><b>{scores.length?(scores.reduce((a,s)=>a+s.c,0)/scores.length).toFixed(1):'—'}</b></div><div><span>DEFORMATION USED</span><b>{Object.values(logs).filter(l=>Number(l.zDepth)>0).length}</b></div></div><div className="export-row"><button onClick={()=>exportData('json')}>EXPORT SESSION JSON</button><button onClick={()=>exportData('csv')}>EXPORT CSV</button><button onClick={()=>show('complete')}>SHOW SESSION COMPLETE</button></div></section>}
+      <ObservationPanel log={log} updateLog={updateLog}/>
+    </div>
   </main>;
 }
 
-function Setup({state,setState,show}:{state:StudyState;setState:(f:(s:StudyState)=>StudyState)=>void;show:(s:StudyState['screen'])=>void}){return <section className="setup-panel"><div className="console-title">SESSION SETUP + PARTICIPANT DISPLAY</div><div className="setup-grid"><Field label="Participant ID" value={state.participantId} onChange={v=>setState(s=>({...s,participantId:String(v)}))}/><SelectField label="Counterbalanced sequence" value={state.sequence} options={['A','B','C','D']} onChange={v=>setState(s=>({...s,sequence:v as keyof typeof SEQUENCES,currentTrial:0}))}/><Field label="Researcher initials" value={state.researcherInitials} onChange={v=>setState(s=>({...s,researcherInitials:String(v)}))}/><Field label="Neutral elicitation mode" type="checkbox" value={state.studyNeutralMode} onChange={v=>setState(s=>({...s,studyNeutralMode:Boolean(v)}))}/></div><div className="phase-controls"><button onClick={()=>show('welcome')}>WELCOME</button><button onClick={()=>show('familiarization')}>FAMILIARIZATION</button><button onClick={()=>show('practice')}>PRACTICE</button><button onClick={()=>show('trial')}>MAIN ELICITATION</button><button onClick={()=>show('interview')}>POST-STUDY</button><button onClick={()=>show('complete')}>COMPLETE</button></div></section>}
+function SetupScreen({setup,setSetup,beginStudy,recent,resume,storageState}:{setup:{participantId:string;sequence:string;researcherInitials:string};setSetup:(v:{participantId:string;sequence:string;researcherInitials:string})=>void;beginStudy:()=>void;recent:StoredSession[];resume:(id:string)=>void;storageState:string}){
+  return <main className="researcher-app setup-shell"><header className="researcher-header"><div><b>LATENT FABRIC</b><span>GESTURE STUDY</span></div><div className="session-readout"><span className={`storage-indicator ${storageState}`}>PERSISTENT STUDY STORAGE</span><a href="/" target="_blank">OPEN PARTICIPANT DISPLAY ↗</a></div></header><section className="participant-setup"><div className="setup-intro"><span>NEW PARTICIPANT</span><h1>Start a study session</h1><p>Enter participant details, choose the assigned sequence, then open the participant display on the projected machine.</p></div><div className="setup-form"><Field label="Participant ID" value={setup.participantId} onChange={v=>setSetup({...setup,participantId:String(v)})}/><SelectField label="Counterbalanced sequence" value={setup.sequence} options={['A','B','C','D']} onChange={v=>setSetup({...setup,sequence:v})}/><Field label="Researcher initials" value={setup.researcherInitials} onChange={v=>setSetup({...setup,researcherInitials:String(v)})}/><button disabled={!setup.participantId.trim()} onClick={beginStudy}>BEGIN PARTICIPANT STUDY →</button></div></section><section className="stored-sessions"><div className="console-title">STORED PARTICIPANT SESSIONS</div>{recent.length===0?<div className="no-sessions">No stored sessions yet.</div>:<div className="session-table"><div className="session-row session-head"><span>PARTICIPANT</span><span>SEQUENCE</span><span>STATUS</span><span>STUDY TIME</span><span>UPDATED</span><span /></div>{recent.map(s=><div className="session-row" key={s.id}><b>{s.participantId}</b><span>{s.sequence}</span><span className={s.status}>{s.status}</span><span>{formatDuration(s.elapsedMs)}</span><span>{new Date(s.updatedAt).toLocaleString()}</span><button onClick={()=>resume(s.id)}>RESUME</button></div>)}</div>}</section></main>
+}
 
-const questions=['What did moving across the fabric mean to you?','What did pushing or deforming it mean to you?','Which actions felt most naturally physical?','Which actions would you rather perform using a visible button?','Which two actions felt most similar or potentially confusing?','Did you perceive the surface as a map, material, controller, landscape, or something else?','Did using one hand versus two hands carry different meanings?','Were there interactions you expected that we did not ask about?'];
-function Interview({show}:{show:(s:StudyState['screen'])=>void}){return <section className="interview-panel"><div className="console-title">RESEARCHER-GUIDED POST-STUDY INTERVIEW</div><button className="show-interview" onClick={()=>show('interview')}>SHOW NEUTRAL INTERVIEW SCREEN TO PARTICIPANT</button>{questions.map((q,i)=><label className="interview-question" key={q}><b>{String(i+1).padStart(2,'0')}</b><span>{q}</span><textarea placeholder="Structured notes…"/></label>)}</section>}
+function ObservationPanel({log,updateLog}:{log:TrialLog;updateLog:(k:string,v:string|number|boolean)=>void}){
+  return <section className="observation-panel"><div className="console-title">GESTURE OBSERVATION · AUTOSAVED DRAFT</div>
+    <fieldset><legend>GESTURE GEOMETRY</legend><div className="two"><SelectField label="Hands" value={log.handCount} options={['One hand','Two hands']} onChange={v=>updateLog('handCount',v)}/><SelectField label="Contact" value={log.contactType} options={['Finger','Multiple fingers','Palm','Whole hand']} onChange={v=>updateLog('contactType',v)}/></div><div className="two"><Field label="Initial region" value={log.initialLocation} onChange={v=>updateLog('initialLocation',v)}/><Field label="Final region" value={log.finalLocation} onChange={v=>updateLog('finalLocation',v)}/></div><div className="two"><SelectField label="Direction" value={log.direction} options={['Left','Right','Forward','Back','Inward','Outward','None']} onChange={v=>updateLog('direction',v)}/><SelectField label="Path shape" value={log.pathShape} options={['Linear','Curved','Circular','Irregular','Stationary']} onChange={v=>updateLog('pathShape',v)}/></div><div className="two"><Field label="Movement distance" value={log.distance} onChange={v=>updateLog('distance',v)}/><Field label="Surface area involved" value={log.surfaceArea} onChange={v=>updateLog('surfaceArea',v)}/></div></fieldset>
+    <fieldset><legend>DEFORMATION + TEMPORAL</legend><div className="three"><Field label="Approx. Z depth mm" type="number" value={log.zDepth} onChange={v=>updateLog('zDepth',v)}/><Field label="Max-depth hold s" type="number" value={log.maxDepthDuration} onChange={v=>updateLog('maxDepthDuration',v)}/><SelectField label="Deformation rate" value={log.deformationRate} options={['Slow','Moderate','Fast']} onChange={v=>updateLog('deformationRate',v)}/></div><div className="three"><Field label="Elicitation time s" type="number" value={log.elicitationTime} onChange={v=>updateLog('elicitationTime',v)}/><Field label="Gesture duration s" type="number" value={log.gestureDuration} onChange={v=>updateLog('gestureDuration',v)}/><Field label="Repetitions" type="number" value={log.repetitions} onChange={v=>updateLog('repetitions',v)}/></div><div className="two"><SelectField label="Release pattern" value={log.releasePattern} options={['Immediate','Gradual','Held then release','Repeated']} onChange={v=>updateLog('releasePattern',v)}/><Field label="Hesitation observed" type="checkbox" value={log.hesitation} onChange={v=>updateLog('hesitation',v)}/></div></fieldset>
+    <fieldset><legend>BEHAVIOURAL STRUCTURE</legend><div className="two"><SelectField label="Temporal form" value={log.discreteContinuous} options={['Discrete','Continuous']} onChange={v=>updateLog('discreteContinuous',v)}/><SelectField label="Motion" value={log.staticDynamic} options={['Static','Dynamic']} onChange={v=>updateLog('staticDynamic',v)}/><SelectField label="Touch" value={log.singleMultiTouch} options={['Single-touch','Multitouch']} onChange={v=>updateLog('singleMultiTouch',v)}/><SelectField label="Spatial meaning" value={log.spatialNonSpatial} options={['Spatial','Non-spatial']} onChange={v=>updateLog('spatialNonSpatial',v)}/><SelectField label="Modality" value={log.deformationPlanar} options={['Deformation-based','Planar','Mixed']} onChange={v=>updateLog('deformationPlanar',v)}/><SelectField label="Interaction type" value={log.symbolicDirect} options={['Symbolic','Direct manipulation','Mixed']} onChange={v=>updateLog('symbolicDirect',v)}/></div></fieldset>
+    <fieldset><legend>RATINGS + NOTES</legend><div className="score-row"><span>NATURALNESS</span>{[1,2,3,4,5].map(n=><button className={Number(log.naturalness)===n?'selected':''} onClick={()=>updateLog('naturalness',n)} key={n}>{n}</button>)}</div><div className="score-row"><span>CONFIDENCE</span>{[1,2,3,4,5].map(n=><button className={Number(log.confidence)===n?'selected':''} onClick={()=>updateLog('confidence',n)} key={n}>{n}</button>)}</div><label className="text-field"><span>Why did the participant choose this action?</span><textarea value={String(log.explanation)} onChange={e=>updateLog('explanation',e.target.value)}/></label><label className="text-field"><span>What did the participant expect the surface to do?</span><textarea value={String(log.expectedResponse)} onChange={e=>updateLog('expectedResponse',e.target.value)}/></label><label className="text-field notes"><span>Researcher notes</span><textarea value={String(log.researcherNotes)} onChange={e=>updateLog('researcherNotes',e.target.value)}/></label></fieldset>
+  </section>
+}
