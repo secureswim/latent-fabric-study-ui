@@ -10,6 +10,7 @@ export async function GET(request: NextRequest) {
   const db = getDb();
   const id = request.nextUrl.searchParams.get('id');
   const live = request.nextUrl.searchParams.get('live');
+  const exportAll = request.nextUrl.searchParams.get('export');
   if (id) {
     const [session] = await db.select().from(studySessions).where(eq(studySessions.id, id)).limit(1);
     if (!session) return NextResponse.json({ error: 'Session not found' }, { status: 404 });
@@ -19,6 +20,11 @@ export async function GET(request: NextRequest) {
   if (live === '1') {
     const [session] = await db.select().from(studySessions).orderBy(desc(studySessions.updatedAt)).limit(1);
     return NextResponse.json({ session: session ?? null });
+  }
+  if (exportAll === 'all') {
+    const sessions = await db.select().from(studySessions).orderBy(desc(studySessions.updatedAt));
+    const trials = await db.select().from(studyTrials).orderBy(studyTrials.sessionId, studyTrials.trialNumber);
+    return NextResponse.json({ sessions, trials });
   }
   const sessions = await db.select().from(studySessions).orderBy(desc(studySessions.updatedAt)).limit(40);
   // Repair records affected by the former final-save race. A session is only
