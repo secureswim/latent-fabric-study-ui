@@ -16,10 +16,28 @@ export default function ResearcherPage(){
   const [log,setLog]=useState<TrialLog>(emptyLog());
   const [logs,setLogs]=useState<Record<string,TrialLog>>({});
   const [tab,setTab]=useState<'observe'|'session'|'interview'|'summary'>('observe');
+  const [now,setNow]=useState(0);
   const channel=useRef<BroadcastChannel|null>(null);
-  useEffect(()=>{ const saved=localStorage.getItem(STORAGE_KEY); if(saved)setStateRaw(JSON.parse(saved)); const savedLogs=localStorage.getItem(LOG_KEY);if(savedLogs)setLogs(JSON.parse(savedLogs));channel.current=new BroadcastChannel(CHANNEL_NAME);return()=>channel.current?.close();},[]);
+  useEffect(()=>{
+    const saved=localStorage.getItem(STORAGE_KEY);
+    if(saved){
+      const restored=JSON.parse(saved) as StudyState;
+      const hydrated={...restored,sessionStartedAt:restored.sessionStartedAt||Date.now()};
+      setStateRaw(hydrated);
+      localStorage.setItem(STORAGE_KEY,JSON.stringify(hydrated));
+    }else{
+      const started={...DEFAULT_STATE,sessionStartedAt:Date.now()};
+      setStateRaw(started);
+      localStorage.setItem(STORAGE_KEY,JSON.stringify(started));
+    }
+    const savedLogs=localStorage.getItem(LOG_KEY);if(savedLogs)setLogs(JSON.parse(savedLogs));
+    channel.current=new BroadcastChannel(CHANNEL_NAME);
+    setNow(Date.now());
+    const timer=window.setInterval(()=>setNow(Date.now()),1000);
+    return()=>{window.clearInterval(timer);channel.current?.close();};
+  },[]);
   const setState=(next:StudyState|((s:StudyState)=>StudyState))=>setStateRaw(prev=>{const value=typeof next==='function'?next(prev):next;localStorage.setItem(STORAGE_KEY,JSON.stringify(value));channel.current?.postMessage({type:'state',state:value});return value;});
-  const ref=currentReferent(state); const elapsed=Math.max(0,Date.now()-state.sessionStartedAt); const elapsedText=`${String(Math.floor(elapsed/60000)).padStart(2,'0')}:${String(Math.floor(elapsed/1000)%60).padStart(2,'0')}`;
+  const ref=currentReferent(state); const elapsed=now&&state.sessionStartedAt?Math.max(0,now-state.sessionStartedAt):0; const elapsedText=`${String(Math.floor(elapsed/60000)).padStart(2,'0')}:${String(Math.floor(elapsed/1000)%60).padStart(2,'0')}`;
   const updateLog=(k:string,v:string|number|boolean)=>setLog(l=>({...l,[k]:v}));
   const saveLog=()=>{const enriched={...log,participantId:state.participantId,sequence:state.sequence,trialNumber:state.currentTrial+1,referentId:ref.id,referentLabel:ref.label,designId:designId(state.designIndex),savedAt:new Date().toISOString()};const next={...logs,[String(state.currentTrial)]:enriched};setLogs(next);localStorage.setItem(LOG_KEY,JSON.stringify(next));};
   const trigger=(response:ResponseKind)=>{setState(s=>{let anchors=s.anchors,locked=s.locked,branch=s.branch,designIndex=s.designIndex; if(response==='anchor'&&!anchors.includes(designIndex))anchors=[...anchors,designIndex];if(response==='lock'&&!locked.includes('Backrest'))locked=[...locked,'Backrest'];if(response==='unlock')locked=[];if(response==='branch')branch=`b${Number(s.branch.slice(1)||0)+1}`;if(['navigate','broad','local','zoom-out'].includes(response))designIndex=(designIndex+({navigate:2,broad:9,local:1,'zoom-out':6} as Record<string,number>)[response])%28;return{...s,response,screen:'responding',anchors,locked,branch,designIndex,overlayVisible:false};});window.setTimeout(()=>setState(s=>({...s,screen:'response-complete'})),850);};

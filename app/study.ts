@@ -70,7 +70,9 @@ export const DEFAULT_STATE: StudyState = {
   anchors: [],
   locked: [],
   recording: true,
-  sessionStartedAt: Date.now(),
+  // Keep the server-rendered and first client-rendered snapshots identical.
+  // The researcher console assigns the real start time after hydration.
+  sessionStartedAt: 0,
   overlayVisible: true,
   studyNeutralMode: true,
 };
