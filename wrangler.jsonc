@@ -8,7 +8,7 @@
     {
       "binding": "DB",
       "database_name": "latent-fabric-study-db",
-      "database_id": "00000000-0000-4000-8000-000000000000",
+      "database_id": "b141b829-2cef-4563-abab-e59193fc7e13",
       "migrations_dir": "drizzle"
     }
   ]

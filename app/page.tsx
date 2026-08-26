@@ -99,11 +99,20 @@ function Rating({ title, low, high }: { title: string; low: string; high: string
 
 export default function Home() {
   const [state, setState] = useState<StudyState>(DEFAULT_STATE);
+  const pendingLocalState = useRef<string | null>(null);
   useEffect(() => {
+    const signature = (value: StudyState) => [
+      value.sessionId, value.sessionStatus, value.setupComplete, value.currentTrial,
+      value.screen, value.response, value.overlayVisible, value.trialRunning,
+    ].join('|');
+    const acceptLocalState = (next: StudyState) => {
+      pendingLocalState.current = signature(next);
+      setState(next);
+    };
     const saved = localStorage.getItem(STORAGE_KEY); if (saved) setState(JSON.parse(saved));
     const channel = new BroadcastChannel(CHANNEL_NAME);
-    channel.onmessage = e => e.data?.type === 'state' && setState(e.data.state);
-    const storage = (e: StorageEvent) => e.key === STORAGE_KEY && e.newValue && setState(JSON.parse(e.newValue));
+    channel.onmessage = e => e.data?.type === 'state' && acceptLocalState(e.data.state);
+    const storage = (e: StorageEvent) => e.key === STORAGE_KEY && e.newValue && acceptLocalState(JSON.parse(e.newValue));
     const syncHostedState = async () => {
       try {
         const response = await fetch('/api/sessions?live=1', { cache: 'no-store' });
@@ -111,6 +120,9 @@ export default function Home() {
         const payload = await response.json();
         if (payload.session?.stateJson) {
           const hosted = JSON.parse(payload.session.stateJson) as StudyState;
+          const pending = pendingLocalState.current;
+          if (pending && signature(hosted) !== pending) return;
+          pendingLocalState.current = null;
           setState(hosted);
           localStorage.setItem(STORAGE_KEY, JSON.stringify(hosted));
         }

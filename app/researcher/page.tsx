@@ -50,19 +50,25 @@ export default function ResearcherPage(){
 
   const loadRecent=async()=>{try{const response=await fetch('/api/sessions',{cache:'no-store'});if(response.ok)setRecent((await response.json()).sessions||[]);}catch{setStorageState('offline')}};
 
-  const persistSnapshot=async(status='draft',providedLog?:TrialLog,providedState?:StudyState)=>{
-    const s=providedState||stateRef.current; if(!s.sessionId)return;
-    const l=providedLog||logRef.current; const ref=currentReferent(s);
-    const sessionStatus=status==='session-complete'?'completed':s.sessionStatus;
+  const persistTrialWithSession=async(status:string,l:TrialLog,trialState:StudyState,sessionState:StudyState)=>{
+    if(!sessionState.sessionId)return;
+    const ref=currentReferent(trialState);
+    const sessionStatus=status==='session-complete'?'completed':sessionState.sessionStatus;
     setStorageState('saving');
     try{
       const response=await fetch('/api/sessions',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({
-        action:'autosave',sessionId:s.sessionId,sessionStatus,
-        currentTrial:s.currentTrial,state:s,elapsedMs:sessionElapsed(s),trial:{trialNumber:s.currentTrial+1,referentId:ref.id,referentLabel:ref.label,
-        status:status==='completed'?'completed':l.status,data:l,durationMs:trialElapsed(s,l),startedAt:l.trialStartedAt||s.trialStartedAt||0}
+        action:'autosave',sessionId:sessionState.sessionId,sessionStatus,
+        currentTrial:sessionState.currentTrial,state:sessionState,elapsedMs:sessionElapsed(sessionState),trial:{trialNumber:trialState.currentTrial+1,referentId:ref.id,referentLabel:ref.label,
+        status:status==='completed'?'completed':l.status,data:l,durationMs:l.status==='running'?trialElapsed(trialState,l):Number(l.trialDurationMs||0),startedAt:l.trialStartedAt||trialState.trialStartedAt||0}
       })});
       if(!response.ok)throw new Error('save failed');setStorageState('saved');setSavedAt(Date.now());
     }catch{setStorageState('offline')}
+  };
+
+  const persistSnapshot=async(status='draft',providedLog?:TrialLog,providedState?:StudyState)=>{
+    const s=providedState||stateRef.current;
+    const l=providedLog||logRef.current;
+    await persistTrialWithSession(status,l,s,s);
   };
 
   const queueRemoteSave=(nextLog:TrialLog,nextState=stateRef.current)=>{
@@ -103,10 +109,11 @@ export default function ResearcherPage(){
     }catch{setStorageState('offline')}};
 
   const selectTrial=async(index:number)=>{
-    const currentDuration=trialElapsed();const currentDraft={...logRef.current,trialDurationMs:currentDuration,status:logRef.current.status==='completed'?'completed':logRef.current.status==='not-started'?'not-started':'draft'};storeDraft(currentDraft);await persistSnapshot('draft',currentDraft);
+    const previous=stateRef.current;const currentDuration=trialElapsed();const currentDraft={...logRef.current,trialDurationMs:currentDuration,status:logRef.current.status==='completed'?'completed':logRef.current.status==='not-started'?'not-started':'draft'};
+    if(remoteTimer.current)window.clearTimeout(remoteTimer.current);storeDraft(currentDraft,previous.currentTrial,false);
     const selected=logsRef.current[String(index)]||emptyLog();logRef.current=selected;setLog(selected);
-    const next={...stateRef.current,currentTrial:index,screen:'trial' as const,response:'idle' as const,overlayVisible:true,trialRunning:false,trialStartedAt:0,trialAccumulatedMs:Number(selected.trialDurationMs||0)};publishState(next);
-    await persistSnapshot('draft',selected,next);
+    const next={...previous,currentTrial:index,screen:'trial' as const,response:'idle' as const,overlayVisible:true,trialRunning:false,trialStartedAt:0,trialAccumulatedMs:Number(selected.trialDurationMs||0)};publishState(next);
+    await persistTrialWithSession('draft',currentDraft,previous,next);
   };
 
   const startTrial=()=>{
@@ -134,8 +141,10 @@ export default function ResearcherPage(){
     storeDraft(completed,stateRef.current.currentTrial,false);
     const stopped={...stateRef.current,trialRunning:false,trialStartedAt:0,trialAccumulatedMs:duration};
     if(stopped.currentTrial>=14){const finished={...stopped,sessionStatus:'completed' as const,screen:'complete' as const,overlayVisible:true,recording:false,sessionAccumulatedMs:sessionElapsed(stopped,at),sessionRunStartedAt:0};publishState(finished);await persistSnapshot('session-complete',completed,finished);await loadRecent();return}
-    publishState(stopped);await persistSnapshot('completed',completed,stopped);
-    await selectTrial(stopped.currentTrial+1);
+    const selected=logsRef.current[String(stopped.currentTrial+1)]||emptyLog();logRef.current=selected;setLog(selected);
+    const next={...stopped,currentTrial:stopped.currentTrial+1,screen:'trial' as const,response:'idle' as const,overlayVisible:true,trialAccumulatedMs:Number(selected.trialDurationMs||0)};
+    publishState(next);
+    await persistTrialWithSession('completed',completed,stopped,next);
   };
 
   const exitStudy=async()=>{
