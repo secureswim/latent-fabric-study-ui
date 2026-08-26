@@ -43,6 +43,7 @@ export const SEQUENCES: Record<string, number[]> = {
 
 export type StudyState = {
   sessionId: string;
+  sessionStatus: 'active' | 'paused' | 'completed';
   setupComplete: boolean;
   participantId: string;
   researcherInitials: string;
@@ -67,6 +68,7 @@ export type StudyState = {
 
 export const DEFAULT_STATE: StudyState = {
   sessionId: '',
+  sessionStatus: 'paused',
   setupComplete: false,
   participantId: 'P07',
   researcherInitials: '',
@@ -78,7 +80,7 @@ export const DEFAULT_STATE: StudyState = {
   branch: 'b0',
   anchors: [],
   locked: [],
-  recording: true,
+  recording: false,
   // Keep the server-rendered and first client-rendered snapshots identical.
   // The researcher console assigns the real start time after hydration.
   sessionStartedAt: 0,

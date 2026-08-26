@@ -53,10 +53,11 @@ export default function ResearcherPage(){
   const persistSnapshot=async(status='draft',providedLog?:TrialLog,providedState?:StudyState)=>{
     const s=providedState||stateRef.current; if(!s.sessionId)return;
     const l=providedLog||logRef.current; const ref=currentReferent(s);
+    const sessionStatus=status==='session-complete'?'completed':s.sessionStatus;
     setStorageState('saving');
     try{
       const response=await fetch('/api/sessions',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({
-        action:'autosave',sessionId:s.sessionId,sessionStatus:status==='session-complete'?'completed':s.recording?'active':'paused',
+        action:'autosave',sessionId:s.sessionId,sessionStatus,
         currentTrial:s.currentTrial,state:s,elapsedMs:sessionElapsed(s),trial:{trialNumber:s.currentTrial+1,referentId:ref.id,referentLabel:ref.label,
         status:status==='completed'?'completed':l.status,data:l,durationMs:trialElapsed(s,l),startedAt:l.trialStartedAt||s.trialStartedAt||0}
       })});
@@ -78,15 +79,15 @@ export default function ResearcherPage(){
     return()=>{window.clearInterval(clock);window.clearInterval(backup);if(remoteTimer.current)window.clearTimeout(remoteTimer.current);channel.current?.close()};
   },[]);
 
-  const storeDraft=(nextLog:TrialLog,trial=stateRef.current.currentTrial)=>{
+  const storeDraft=(nextLog:TrialLog,trial=stateRef.current.currentTrial,queue=true)=>{
     logRef.current=nextLog;setLog(nextLog);
-    const nextLogs={...logsRef.current,[String(trial)]:nextLog};logsRef.current=nextLogs;setLogs(nextLogs);localStorage.setItem(LOG_KEY,JSON.stringify(nextLogs));queueRemoteSave(nextLog);
+    const nextLogs={...logsRef.current,[String(trial)]:nextLog};logsRef.current=nextLogs;setLogs(nextLogs);localStorage.setItem(LOG_KEY,JSON.stringify(nextLogs));if(queue)queueRemoteSave(nextLog);
   };
   const updateLog=(key:string,value:string|number|boolean)=>storeDraft({...logRef.current,[key]:value});
 
   const beginStudy=async()=>{
     if(!setup.participantId.trim())return;
-    const at=Date.now();const provisional:StudyState={...DEFAULT_STATE,setupComplete:true,participantId:setup.participantId.trim(),researcherInitials:setup.researcherInitials.trim(),sequence:setup.sequence as keyof typeof SEQUENCES,screen:'trial',currentTrial:0,recording:true,sessionStartedAt:at,sessionRunStartedAt:at,overlayVisible:true};
+    const at=Date.now();const provisional:StudyState={...DEFAULT_STATE,sessionStatus:'active',setupComplete:true,participantId:setup.participantId.trim(),researcherInitials:setup.researcherInitials.trim(),sequence:setup.sequence as keyof typeof SEQUENCES,screen:'trial',currentTrial:0,recording:true,sessionStartedAt:at,sessionRunStartedAt:at,overlayVisible:true};
     setStorageState('saving');
     try{
       const response=await fetch('/api/sessions',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({action:'create',participantId:provisional.participantId,sequence:provisional.sequence,researcherInitials:provisional.researcherInitials,startedAt:at,state:provisional})});
@@ -96,7 +97,7 @@ export default function ResearcherPage(){
   };
 
   const resumeSession=async(id:string)=>{
-    setStorageState('saving');try{const response=await fetch(`/api/sessions?id=${encodeURIComponent(id)}`,{cache:'no-store'});if(!response.ok)throw new Error();const payload=await response.json();const restored={...DEFAULT_STATE,...JSON.parse(payload.session.stateJson),sessionId:id,setupComplete:true,recording:false,sessionRunStartedAt:0,trialRunning:false} as StudyState;
+    setStorageState('saving');try{const response=await fetch(`/api/sessions?id=${encodeURIComponent(id)}`,{cache:'no-store'});if(!response.ok)throw new Error();const payload=await response.json();const restored={...DEFAULT_STATE,...JSON.parse(payload.session.stateJson),sessionId:id,sessionStatus:payload.session.status,setupComplete:true,recording:false,sessionRunStartedAt:0,trialRunning:false} as StudyState;
       const restoredLogs:Record<string,TrialLog>={};for(const row of payload.trials||[])restoredLogs[String(row.trialNumber-1)]={...emptyLog(),...JSON.parse(row.draftJson),trialDurationMs:row.durationMs,status:row.status,trialStartedAt:row.startedAt||0};
       logsRef.current=restoredLogs;setLogs(restoredLogs);localStorage.setItem(LOG_KEY,JSON.stringify(restoredLogs));const selected=restoredLogs[String(restored.currentTrial)]||emptyLog();logRef.current=selected;setLog(selected);publishState(restored);setStorageState('saved');setSavedAt(Date.now());
     }catch{setStorageState('offline')}};
@@ -121,39 +122,71 @@ export default function ResearcherPage(){
 
   const pauseResume=()=>{
     const at=Date.now();const s=stateRef.current;
-    if(s.recording){const duration=trialElapsed(s,logRef.current,at);const draft={...logRef.current,trialDurationMs:duration,status:s.trialRunning?'paused':logRef.current.status};storeDraft(draft);const paused={...s,recording:false,sessionAccumulatedMs:sessionElapsed(s,at),sessionRunStartedAt:0,trialRunning:false,trialStartedAt:0};publishState(paused);persistSnapshot('draft',draft,paused)}
-    else{const resumed={...s,recording:true,sessionRunStartedAt:at,trialRunning:logRef.current.status==='paused',trialStartedAt:logRef.current.status==='paused'?at:0};publishState(resumed);storeDraft({...logRef.current,status:logRef.current.status==='paused'?'running':logRef.current.status})}
+    if(s.sessionStatus==='completed')return;
+    if(s.recording){const duration=trialElapsed(s,logRef.current,at);const draft={...logRef.current,trialDurationMs:duration,status:s.trialRunning?'paused':logRef.current.status};storeDraft(draft);const paused={...s,sessionStatus:'paused' as const,recording:false,sessionAccumulatedMs:sessionElapsed(s,at),sessionRunStartedAt:0,trialRunning:false,trialStartedAt:0};publishState(paused);persistSnapshot('draft',draft,paused)}
+    else{const resumed={...s,sessionStatus:'active' as const,recording:true,sessionRunStartedAt:at,trialRunning:logRef.current.status==='paused',trialStartedAt:logRef.current.status==='paused'?at:0};publishState(resumed);storeDraft({...logRef.current,status:logRef.current.status==='paused'?'running':logRef.current.status})}
   };
 
   const saveNext=async()=>{
-    const at=Date.now();const duration=trialElapsed(stateRef.current,logRef.current,at);const completed={...logRef.current,trialDurationMs:duration,status:'completed'};storeDraft(completed);const stopped={...stateRef.current,trialRunning:false,trialStartedAt:0,trialAccumulatedMs:duration};publishState(stopped);await persistSnapshot('completed',completed,stopped);
-    if(stopped.currentTrial>=14){const finished={...stopped,screen:'complete' as const,overlayVisible:true,recording:false,sessionAccumulatedMs:sessionElapsed(stopped,at),sessionRunStartedAt:0};publishState(finished);await persistSnapshot('session-complete',completed,finished);await loadRecent();return}
+    if(stateRef.current.sessionStatus==='completed')return;
+    const at=Date.now();const duration=trialElapsed(stateRef.current,logRef.current,at);const completed={...logRef.current,trialDurationMs:duration,status:'completed'};
+    if(remoteTimer.current)window.clearTimeout(remoteTimer.current);
+    storeDraft(completed,stateRef.current.currentTrial,false);
+    const stopped={...stateRef.current,trialRunning:false,trialStartedAt:0,trialAccumulatedMs:duration};
+    if(stopped.currentTrial>=14){const finished={...stopped,sessionStatus:'completed' as const,screen:'complete' as const,overlayVisible:true,recording:false,sessionAccumulatedMs:sessionElapsed(stopped,at),sessionRunStartedAt:0};publishState(finished);await persistSnapshot('session-complete',completed,finished);await loadRecent();return}
+    publishState(stopped);await persistSnapshot('completed',completed,stopped);
     await selectTrial(stopped.currentTrial+1);
   };
 
+  const exitStudy=async()=>{
+    const s=stateRef.current;
+    if(s.sessionStatus==='completed'){publishState({...s,setupComplete:false});await loadRecent();return}
+    const at=Date.now();const duration=trialElapsed(s,logRef.current,at);const draft={...logRef.current,trialDurationMs:duration,status:s.trialRunning?'paused':logRef.current.status};
+    if(remoteTimer.current)window.clearTimeout(remoteTimer.current);
+    storeDraft(draft,s.currentTrial,false);
+    const paused={...s,sessionStatus:'paused' as const,setupComplete:false,recording:false,sessionAccumulatedMs:sessionElapsed(s,at),sessionRunStartedAt:0,trialRunning:false,trialStartedAt:0,overlayVisible:true};
+    publishState(paused);await persistSnapshot('draft',draft,paused);await loadRecent();
+  };
+
   const exportSession=()=>{const payload={session:stateRef.current,trials:logsRef.current};const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([JSON.stringify(payload,null,2)],{type:'application/json'}));a.download=`${stateRef.current.participantId}-latent-fabric.json`;a.click();URL.revokeObjectURL(a.href)};
+  const exportStoredSession=async(id:string)=>{
+    setStorageState('saving');
+    try{
+      const response=await fetch(`/api/sessions?id=${encodeURIComponent(id)}`,{cache:'no-store'});if(!response.ok)throw new Error('export failed');
+      const payload=await response.json();
+      const exported={
+        exportVersion:1,
+        exportedAt:new Date().toISOString(),
+        session:{...payload.session,state:JSON.parse(payload.session.stateJson||'{}'),stateJson:undefined},
+        trials:(payload.trials||[]).map((trial:Record<string,unknown>)=>({...trial,data:JSON.parse(String(trial.draftJson||'{}')),draftJson:undefined})),
+      };
+      const participant=String(payload.session.participantId||'participant').replace(/[^a-z0-9_-]+/gi,'-');
+      const url=URL.createObjectURL(new Blob([JSON.stringify(exported,null,2)],{type:'application/json'}));
+      const a=document.createElement('a');a.href=url;a.download=`${participant}-latent-fabric-${payload.session.status}.json`;a.click();URL.revokeObjectURL(url);setStorageState('saved');setSavedAt(Date.now());
+    }catch{setStorageState('offline')}
+  };
   const newParticipant=()=>{const fresh={...DEFAULT_STATE};publishState(fresh);setLog(emptyLog());logRef.current=emptyLog();setLogs({});logsRef.current={};localStorage.removeItem(LOG_KEY);setSetup({participantId:'',sequence:'A',researcherInitials:stateRef.current.researcherInitials});loadRecent()};
 
   const ref=currentReferent(state);const sessionTime=sessionElapsed(state,now||Date.now());const trialTime=trialElapsed(state,log,now||Date.now());
 
-  if(!state.setupComplete)return <SetupScreen setup={setup} setSetup={setSetup} beginStudy={beginStudy} recent={recent} resume={resumeSession} storageState={storageState}/>;
+  if(!state.setupComplete)return <SetupScreen setup={setup} setSetup={setSetup} beginStudy={beginStudy} recent={recent} resume={resumeSession} exportStored={exportStoredSession} storageState={storageState}/>;
 
   return <main className="researcher-app simple-console">
-    <header className="researcher-header"><div><b>LATENT FABRIC</b><span>GESTURE STUDY CONSOLE</span></div><div className="session-readout"><strong>{state.participantId} · SEQUENCE {state.sequence}</strong><span>STUDY <b>{formatDuration(sessionTime)}</b></span><span>TRIAL <b>{formatDuration(trialTime)}</b></span><span className={`storage-indicator ${storageState}`}>{storageState==='saving'?'◌ SAVING':storageState==='offline'?'△ LOCAL BACKUP':'● STORED'}</span></div></header>
+    <header className="researcher-header"><div><b>LATENT FABRIC</b><span>GESTURE STUDY CONSOLE</span></div><div className="session-readout"><strong>{state.participantId} · SEQUENCE {state.sequence}</strong><span>STUDY <b>{formatDuration(sessionTime)}</b></span><span>TRIAL <b>{formatDuration(trialTime)}</b></span><span className={`storage-indicator ${storageState}`}>{storageState==='saving'?'◌ SAVING':storageState==='offline'?'△ LOCAL BACKUP':'● STORED'}</span><button className="exit-study" onClick={exitStudy}>{state.sessionStatus==='completed'?'EXIT RESULTS':'EXIT · SAVE PAUSED'}</button></div></header>
     <div className="single-console-grid">
       <aside className="trial-list simple-trials"><div className="console-title">TRIALS · {Object.values(logs).filter(l=>l.status==='completed').length} / 15 COMPLETE</div>{SEQUENCES[state.sequence].map((ri,i)=><button key={i} className={`${i===state.currentTrial?'active':''} ${logs[String(i)]?.status==='completed'?'done':''}`} onClick={()=>selectTrial(i)}><span>{String(i+1).padStart(2,'0')}</span><b>{REFERENTS[ri].label}</b><small>{logs[String(i)]?.status==='completed'?'✓':logs[String(i)]?.status==='draft'||logs[String(i)]?.status==='paused'?'DRAFT':REFERENTS[ri].tier}</small></button>)}<div className="storage-card"><span>STUDY STORAGE</span><b>{storageState==='offline'?'Local backup active':'Durable autosave active'}</b><small>{savedAt?`Last saved ${new Date(savedAt).toLocaleTimeString()}`:'Waiting for first change'}</small><button onClick={exportSession}>EXPORT JSON</button>{state.screen==='complete'&&<button className="new-participant" onClick={newParticipant}>NEXT PARTICIPANT</button>}</div></aside>
       <section className="study-controls">
         <div className="referent-card"><div className="referent-meta"><span>TASK {String(state.currentTrial+1).padStart(2,'0')} / 15 · TIER {ref.tier}</span><strong>{ref.label}</strong></div><p>Participant prompt: “{ref.prompt}”</p><div className="task-timing"><span>TRIAL TIME</span><b>{formatDuration(trialTime)}</b><small>{state.trialRunning?'RUNNING':log.status==='completed'?'SAVED':'READY'}</small></div></div>
         <div className="workflow-card simplified-workflow"><div className="console-title">TRIAL CONTROL</div><button className="start-trial" disabled={state.trialRunning||log.status==='completed'} onClick={startTrial}>{log.status==='completed'?'TRIAL SAVED':state.trialRunning?'TRIAL IN PROGRESS':'START TRIAL'}</button><button className="primary-trigger" disabled={!state.trialRunning&&log.status!=='running'} onClick={trigger}>TRIGGER RESPONSE</button><p>Selecting a task shows its prompt to the participant. Starting the trial dismisses the prompt and begins timing.</p></div>
-        <div className="transport"><button onClick={()=>selectTrial(Math.max(0,state.currentTrial-1))}>← PREVIOUS</button><button onClick={pauseResume}>{state.recording?'PAUSE SESSION':'RESUME SESSION'}</button><button className="next" onClick={saveNext}>{state.currentTrial===14?'SAVE PARTICIPANT RESULTS':'SAVE + NEXT TRIAL →'}</button></div>
+        <div className="transport"><button onClick={()=>selectTrial(Math.max(0,state.currentTrial-1))}>← PREVIOUS</button><button disabled={state.sessionStatus==='completed'} onClick={pauseResume}>{state.sessionStatus==='completed'?'SESSION COMPLETE':state.recording?'PAUSE SESSION':'RESUME SESSION'}</button><button className={state.currentTrial===14?'next finish-study':'next'} disabled={state.sessionStatus==='completed'} onClick={saveNext}>{state.sessionStatus==='completed'?'PARTICIPANT COMPLETE':state.currentTrial===14?'COMPLETE PARTICIPANT STUDY ✓':'SAVE + NEXT TRIAL →'}</button></div>
       </section>
       <ObservationPanel log={log} updateLog={updateLog}/>
     </div>
   </main>;
 }
 
-function SetupScreen({setup,setSetup,beginStudy,recent,resume,storageState}:{setup:{participantId:string;sequence:string;researcherInitials:string};setSetup:(v:{participantId:string;sequence:string;researcherInitials:string})=>void;beginStudy:()=>void;recent:StoredSession[];resume:(id:string)=>void;storageState:string}){
-  return <main className="researcher-app setup-shell"><header className="researcher-header"><div><b>LATENT FABRIC</b><span>GESTURE STUDY</span></div><div className="session-readout"><span className={`storage-indicator ${storageState}`}>PERSISTENT STUDY STORAGE</span><a href="/" target="_blank">OPEN PARTICIPANT DISPLAY ↗</a></div></header><section className="participant-setup"><div className="setup-intro"><span>NEW PARTICIPANT</span><h1>Start a study session</h1><p>Enter participant details, choose the assigned sequence, then open the participant display on the projected machine.</p></div><div className="setup-form"><Field label="Participant ID" value={setup.participantId} onChange={v=>setSetup({...setup,participantId:String(v)})}/><SelectField label="Counterbalanced sequence" value={setup.sequence} options={['A','B','C','D']} onChange={v=>setSetup({...setup,sequence:v})}/><Field label="Researcher initials" value={setup.researcherInitials} onChange={v=>setSetup({...setup,researcherInitials:String(v)})}/><button disabled={!setup.participantId.trim()} onClick={beginStudy}>BEGIN PARTICIPANT STUDY →</button></div></section><section className="stored-sessions"><div className="console-title">STORED PARTICIPANT SESSIONS</div>{recent.length===0?<div className="no-sessions">No stored sessions yet.</div>:<div className="session-table"><div className="session-row session-head"><span>PARTICIPANT</span><span>SEQUENCE</span><span>STATUS</span><span>STUDY TIME</span><span>UPDATED</span><span /></div>{recent.map(s=><div className="session-row" key={s.id}><b>{s.participantId}</b><span>{s.sequence}</span><span className={s.status}>{s.status}</span><span>{formatDuration(s.elapsedMs)}</span><span>{new Date(s.updatedAt).toLocaleString()}</span><button onClick={()=>resume(s.id)}>RESUME</button></div>)}</div>}</section></main>
+function SetupScreen({setup,setSetup,beginStudy,recent,resume,exportStored,storageState}:{setup:{participantId:string;sequence:string;researcherInitials:string};setSetup:(v:{participantId:string;sequence:string;researcherInitials:string})=>void;beginStudy:()=>void;recent:StoredSession[];resume:(id:string)=>void;exportStored:(id:string)=>void;storageState:string}){
+  return <main className="researcher-app setup-shell"><header className="researcher-header"><div><b>LATENT FABRIC</b><span>GESTURE STUDY</span></div><div className="session-readout"><span className={`storage-indicator ${storageState}`}>PERSISTENT STUDY STORAGE</span><a href="/" target="_blank">OPEN PARTICIPANT DISPLAY ↗</a></div></header><section className="participant-setup"><div className="setup-intro"><span>NEW PARTICIPANT</span><h1>Start a study session</h1><p>Enter participant details, choose the assigned sequence, then open the participant display on the projected machine.</p></div><div className="setup-form"><Field label="Participant ID" value={setup.participantId} onChange={v=>setSetup({...setup,participantId:String(v)})}/><SelectField label="Counterbalanced sequence" value={setup.sequence} options={['A','B','C','D']} onChange={v=>setSetup({...setup,sequence:v})}/><Field label="Researcher initials" value={setup.researcherInitials} onChange={v=>setSetup({...setup,researcherInitials:String(v)})}/><button disabled={!setup.participantId.trim()} onClick={beginStudy}>BEGIN PARTICIPANT STUDY →</button></div></section><section className="stored-sessions"><div className="console-title">STORED PARTICIPANT SESSIONS</div>{recent.length===0?<div className="no-sessions">No stored sessions yet.</div>:<div className="session-table"><div className="session-row session-head"><span>PARTICIPANT</span><span>SEQUENCE</span><span>STATUS</span><span>STUDY TIME</span><span>UPDATED</span><span>ACTIONS</span></div>{recent.map(s=><div className="session-row" key={s.id}><b>{s.participantId}</b><span>{s.sequence}</span><span className={s.status}>{s.status}</span><span>{formatDuration(s.elapsedMs)}</span><span>{new Date(s.updatedAt).toLocaleString()}</span><div className="session-actions"><button onClick={()=>resume(s.id)}>{s.status==='completed'?'VIEW RESULTS':'RESUME'}</button><button className="export-stored" onClick={()=>exportStored(s.id)}>EXPORT JSON</button></div></div>)}</div>}</section></main>
 }
 
 function ObservationPanel({log,updateLog}:{log:TrialLog;updateLog:(k:string,v:string|number|boolean)=>void}){

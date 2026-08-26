@@ -21,7 +21,17 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ session: session ?? null });
   }
   const sessions = await db.select().from(studySessions).orderBy(desc(studySessions.updatedAt)).limit(40);
-  return NextResponse.json({ sessions });
+  // Repair records affected by the former final-save race. A session is only
+  // promoted when every one of the 15 persisted trials is already complete.
+  const repaired = await Promise.all(sessions.map(async (session) => {
+    if (session.status !== 'paused' || session.currentTrial < 14) return session;
+    const trials = await db.select({ status: studyTrials.status }).from(studyTrials).where(eq(studyTrials.sessionId, session.id));
+    if (trials.length < 15 || trials.some((trial) => trial.status !== 'completed')) return session;
+    const completedAt = session.completedAt ?? session.updatedAt;
+    await db.update(studySessions).set({ status: 'completed', completedAt }).where(eq(studySessions.id, session.id));
+    return { ...session, status: 'completed', completedAt };
+  }));
+  return NextResponse.json({ sessions: repaired });
 }
 
 export async function POST(request: NextRequest) {
@@ -52,6 +62,12 @@ export async function POST(request: NextRequest) {
   if (body.action === 'autosave') {
     const sessionId = String(body.sessionId || '');
     if (!sessionId) return NextResponse.json({ error: 'Missing session id' }, { status: 400 });
+    const [existing] = await db.select({ status: studySessions.status }).from(studySessions).where(eq(studySessions.id, sessionId)).limit(1);
+    if (!existing) return NextResponse.json({ error: 'Session not found' }, { status: 404 });
+    // Completion is terminal: older in-flight autosaves cannot downgrade it.
+    if (existing.status === 'completed' && body.sessionStatus !== 'completed') {
+      return NextResponse.json({ ok: true, savedAt: now, ignored: 'completed-session' });
+    }
     await db.update(studySessions).set({
       status: String(body.sessionStatus || 'active'),
       currentTrial: Number(body.currentTrial || 0),
