@@ -15,6 +15,14 @@ export type Referent = {
   prompt: string;
 };
 
+export type LatentSnapshot = {
+  designIndex: number;
+  branch: string;
+  anchors: number[];
+  locked: string[];
+  visitedDesigns: number[];
+};
+
 export const REFERENTS: Referent[] = [
   { id: 'navigate', label: 'Navigate', tier: 'A', prompt: 'Move through the possibilities in a direction that feels right to you.' },
   { id: 'explore-broadly', label: 'Explore More Broadly', tier: 'A', prompt: 'You want to move away from designs like this and discover substantially different possibilities.' },
@@ -51,13 +59,19 @@ export type StudyState = {
   screen: ScreenMode;
   currentTrial: number;
   response: ResponseKind;
+  animationId: string;
+  responsePhase: 'idle' | 'queued' | 'running' | 'complete';
   responseStartedAt: number;
   responseDurationMs: number;
+  responseCompletedAt: number;
+  responseFrom: LatentSnapshot;
+  responseTarget: LatentSnapshot;
   previousDesignIndex: number;
   designIndex: number;
   branch: string;
   anchors: number[];
   locked: string[];
+  visitedDesigns: number[];
   recording: boolean;
   sessionStartedAt: number;
   sessionAccumulatedMs: number;
@@ -79,13 +93,19 @@ export const DEFAULT_STATE: StudyState = {
   screen: 'welcome',
   currentTrial: 0,
   response: 'idle',
+  animationId: '',
+  responsePhase: 'idle',
   responseStartedAt: 0,
-  responseDurationMs: 3000,
+  responseDurationMs: 2800,
+  responseCompletedAt: 0,
+  responseFrom: { designIndex: 8, branch: 'b0', anchors: [], locked: [], visitedDesigns: [8] },
+  responseTarget: { designIndex: 8, branch: 'b0', anchors: [], locked: [], visitedDesigns: [8] },
   previousDesignIndex: 8,
   designIndex: 8,
   branch: 'b0',
   anchors: [],
   locked: [],
+  visitedDesigns: [8],
   recording: false,
   // Keep the server-rendered and first client-rendered snapshots identical.
   // The researcher console assigns the real start time after hydration.

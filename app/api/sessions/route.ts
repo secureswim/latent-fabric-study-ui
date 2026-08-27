@@ -43,7 +43,7 @@ export async function GET(request: NextRequest) {
 export async function POST(request: NextRequest) {
   await ensureSchema();
   const db = getDb();
-  const body = await request.json();
+  const body = await request.json() as Record<string, any>;
   const now = Date.now();
 
   if (body.action === 'create') {
@@ -113,6 +113,41 @@ export async function POST(request: NextRequest) {
       });
     }
     return NextResponse.json({ ok: true, savedAt: now });
+  }
+
+  if (body.action === 'animation-ack') {
+    const sessionId = String(body.sessionId || '');
+    const animationId = String(body.animationId || '');
+    const phase = String(body.phase || '');
+    if (!sessionId || !animationId || !['running', 'complete'].includes(phase)) {
+      return NextResponse.json({ error: 'Invalid animation acknowledgement' }, { status: 400 });
+    }
+    const [session] = await db.select().from(studySessions).where(eq(studySessions.id, sessionId)).limit(1);
+    if (!session) return NextResponse.json({ error: 'Session not found' }, { status: 404 });
+    const state = JSON.parse(session.stateJson || '{}');
+    if (state.animationId !== animationId) {
+      return NextResponse.json({ error: 'Animation is no longer current' }, { status: 409 });
+    }
+    const target = state.responseTarget || {};
+    const nextState = phase === 'complete' ? {
+      ...state,
+      designIndex: Number(target.designIndex ?? state.designIndex ?? 8),
+      branch: String(target.branch ?? state.branch ?? 'b0'),
+      anchors: Array.isArray(target.anchors) ? target.anchors : (state.anchors || []),
+      locked: Array.isArray(target.locked) ? target.locked : (state.locked || []),
+      visitedDesigns: Array.isArray(target.visitedDesigns) ? target.visitedDesigns : (state.visitedDesigns || [8]),
+      previousDesignIndex: Number(state.responseFrom?.designIndex ?? state.designIndex ?? 8),
+      responsePhase: 'complete',
+      responseCompletedAt: now,
+      screen: 'response-complete',
+    } : {
+      ...state,
+      responsePhase: 'running',
+      responseStartedAt: Number(body.startedAt || now),
+      screen: 'responding',
+    };
+    await db.update(studySessions).set({ stateJson: JSON.stringify(nextState), updatedAt: now }).where(eq(studySessions.id, sessionId));
+    return NextResponse.json({ ok: true, state: nextState, savedAt: now });
   }
 
   if (body.action === 'resume') {

@@ -2,6 +2,7 @@
 
 import { CSSProperties, useEffect, useMemo, useRef, useState } from 'react';
 import { CHANNEL_NAME, currentReferent, DEFAULT_STATE, designId, STORAGE_KEY, StudyState } from './study';
+import { activeDesignLabel, animationProgress, CandidateField, RESPONSE_LABELS } from './latent-field';
 
 type Pt = { x: number; y: number; a: number; s: number };
 
@@ -24,7 +25,7 @@ const cursorPoint = (index: number, width: number, height: number) => ({
   y: height * (.46 + ((index * 3) % 7) * .022),
 });
 
-const RESPONSE_LABELS: Record<string, string> = {
+const LEGACY_RESPONSE_LABELS: Record<string, string> = {
   navigate: 'TRAVERSING LATENT NEIGHBOURHOOD', broad: 'EXPANDING SEARCH RADIUS', local: 'REFINING LOCAL CLUSTER',
   'zoom-out': 'WIDENING LATENT VIEW', anchor: 'PLACING ANCHOR AT CURSOR', 'return-anchor': 'RETURNING TO PRESERVED STATE',
   branch: 'GENERATING NEW BRANCH', lock: 'PRESERVING BACKREST', unlock: 'RELEASING BACKREST', undo: 'REVERSING LAST MOVE',
@@ -32,7 +33,7 @@ const RESPONSE_LABELS: Record<string, string> = {
   'timeline-branch': 'SWITCHING EXPLORATION PATH', select: 'COMMITTING FINAL SELECTION',
 };
 
-function CandidateField({ state }: { state: StudyState }) {
+function LegacyCandidateField({ state }: { state: StudyState }) {
   const canvas = useRef<HTMLCanvasElement>(null);
   const points = useMemo(() => seededPoints(), []);
   useEffect(() => {
@@ -132,6 +133,24 @@ function ChairModel({ state, small = false }: { state: StudyState; small?: boole
   </div>;
 }
 
+function PreviewMorph({state}:{state:StudyState}){
+  const [progress,setProgress]=useState(()=>animationProgress(state));
+  useEffect(()=>{
+    let frame=0;
+    const tick=()=>{const next=animationProgress(state);setProgress(next);if(state.responsePhase==='running'&&next<1)frame=requestAnimationFrame(tick)};
+    tick();return()=>cancelAnimationFrame(frame);
+  },[state.animationId,state.responsePhase,state.responseStartedAt,state.responseDurationMs]);
+  if(state.responsePhase!=='running')return <ChairModel state={state}/>;
+  const from={...state,...state.responseFrom};
+  const target={...state,...state.responseTarget};
+  const locked=state.response==='lock'?progress:state.response==='unlock'?1-progress:0;
+  return <div className="chair-morph" style={{'--morph-progress':progress,'--lock-progress':locked} as CSSProperties}>
+    <div className="chair-morph-layer from"><ChairModel state={from}/></div>
+    <div className="chair-morph-layer target"><ChairModel state={target}/></div>
+    {(state.response==='lock'||state.response==='unlock')&&<div className="preview-lock-brackets"><i/><i/><b>{state.response==='lock'?'CONSTRAINT APPLIED':'CONSTRAINT RELEASED'}</b></div>}
+  </div>;
+}
+
 function TaskOverlay({ state }: { state: StudyState }) {
   const ref = currentReferent(state);
   if (!state.overlayVisible) return null;
@@ -152,17 +171,31 @@ function Rating({ title, low, high }: { title: string; low: string; high: string
 
 export default function Home() {
   const [state, setState] = useState<StudyState>(DEFAULT_STATE);
+  const stateRef = useRef<StudyState>(DEFAULT_STATE);
   const pendingLocalState = useRef<string | null>(null);
+  const acknowledgedStart = useRef('');
+  const acknowledgedComplete = useRef('');
+  const completionTimer = useRef<number | undefined>(undefined);
+  const applyState = (next: StudyState) => {
+    const normalized = {...DEFAULT_STATE,...next} as StudyState;
+    stateRef.current = normalized;
+    setState(normalized);
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(normalized));
+  };
   useEffect(() => {
     const signature = (value: StudyState) => [
       value.sessionId, value.sessionStatus, value.setupComplete, value.currentTrial,
       value.screen, value.response, value.overlayVisible, value.trialRunning,
+      value.animationId, value.responsePhase,
     ].join('|');
     const acceptLocalState = (next: StudyState) => {
-      pendingLocalState.current = signature(next);
-      setState(next);
+      const normalized={...DEFAULT_STATE,...next} as StudyState;
+      const current=stateRef.current;
+      if(current.animationId&&current.animationId===normalized.animationId&&current.responsePhase==='running'&&normalized.responsePhase==='queued')return;
+      pendingLocalState.current = signature(normalized);
+      applyState(normalized);
     };
-    const saved = localStorage.getItem(STORAGE_KEY); if (saved) setState(JSON.parse(saved));
+    const saved = localStorage.getItem(STORAGE_KEY); if (saved) applyState(JSON.parse(saved));
     const channel = new BroadcastChannel(CHANNEL_NAME);
     channel.onmessage = e => e.data?.type === 'state' && acceptLocalState(e.data.state);
     const storage = (e: StorageEvent) => e.key === STORAGE_KEY && e.newValue && acceptLocalState(JSON.parse(e.newValue));
@@ -170,14 +203,15 @@ export default function Home() {
       try {
         const response = await fetch('/api/sessions?live=1', { cache: 'no-store' });
         if (!response.ok) return;
-        const payload = await response.json();
+        const payload:any = await response.json();
         if (payload.session?.stateJson) {
           const hosted = JSON.parse(payload.session.stateJson) as StudyState;
+          const current=stateRef.current;
+          if(current.animationId&&current.animationId===hosted.animationId&&current.responsePhase==='running'&&hosted.responsePhase==='queued')return;
           const pending = pendingLocalState.current;
           if (pending && signature(hosted) !== pending) return;
           pendingLocalState.current = null;
-          setState(hosted);
-          localStorage.setItem(STORAGE_KEY, JSON.stringify(hosted));
+          applyState(hosted);
         }
       } catch { /* The local same-browser channel remains available offline. */ }
     };
@@ -185,10 +219,46 @@ export default function Home() {
     const hostedTimer = window.setInterval(syncHostedState, 700);
     window.addEventListener('storage', storage); return () => { channel.close(); window.clearInterval(hostedTimer); window.removeEventListener('storage', storage); };
   }, []);
+  useEffect(()=>{
+    const id=state.animationId;
+    if(!id||!state.sessionId)return;
+    if(state.responsePhase==='queued'&&acknowledgedStart.current!==id){
+      acknowledgedStart.current=id;
+      const startedAt=Date.now();
+      const running={...state,responsePhase:'running' as const,responseStartedAt:startedAt,screen:'responding' as const};
+      pendingLocalState.current=null;
+      applyState(running);
+      fetch('/api/sessions',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({action:'animation-ack',sessionId:state.sessionId,animationId:id,phase:'running',startedAt})})
+        .then(response=>response.ok?response.json() as Promise<any>:null)
+        .then(payload=>{if(payload?.state&&stateRef.current.animationId===id&&stateRef.current.responsePhase!=='complete')applyState(payload.state)})
+        .catch(()=>{/* Local playback still completes and the next poll can retry state synchronization. */});
+      return;
+    }
+    if(state.responsePhase==='running'&&acknowledgedComplete.current!==id){
+      if(completionTimer.current)window.clearTimeout(completionTimer.current);
+      const remaining=Math.max(0,Number(state.responseDurationMs||2800)-(Date.now()-Number(state.responseStartedAt||Date.now())));
+      const finish=async()=>{
+        if(stateRef.current.animationId!==id||acknowledgedComplete.current===id)return;
+        acknowledgedComplete.current=id;
+        try{
+          const response=await fetch('/api/sessions',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({action:'animation-ack',sessionId:state.sessionId,animationId:id,phase:'complete',completedAt:Date.now()})});
+          if(!response.ok)throw new Error('animation completion failed');
+          const payload:any=await response.json();
+          if(payload.state&&stateRef.current.animationId===id)applyState(payload.state);
+        }catch{
+          acknowledgedComplete.current='';
+          completionTimer.current=window.setTimeout(finish,800);
+        }
+      };
+      completionTimer.current=window.setTimeout(finish,remaining+80);
+    }
+    return()=>{if(completionTimer.current)window.clearTimeout(completionTimer.current)};
+  },[state.animationId,state.responsePhase,state.responseStartedAt,state.responseDurationMs,state.sessionId]);
   const id = designId(state.designIndex);
+  const displayId=activeDesignLabel(state);
   const dims = [820 + state.designIndex*9%260, 730 + state.designIndex*7%210, 960 + state.designIndex*13%280, 390 + state.designIndex*3%80];
   return <main className={`instrument ${state.overlayVisible ? 'overlay-active' : ''}`}>
-    <header className="instrument-header"><b>LATENT FABRIC</b><span>STATE <strong>{state.screen === 'responding' ? 'SOLVING' : state.response.toUpperCase()}</strong></span><span>DESIGN <strong>{id}</strong></span><span>BRANCH <strong>{state.branch}</strong></span><span>LOCKED <strong>{state.locked.length} / 5</strong></span><span className="header-domain">CHAIR · 2 049 CANDIDATES</span></header>
+    <header className="instrument-header"><b>LATENT FABRIC</b><span>STATE <strong>{state.responsePhase==='queued'?'QUEUED':state.responsePhase==='running'?'TRANSFORMING':state.response.toUpperCase()}</strong></span><span>DESIGN <strong>{displayId}</strong></span><span>BRANCH <strong>{state.branch}</strong></span><span>LOCKED <strong>{state.locked.length} / 5</strong></span><span className="header-domain">CHAIR · 2 049 CANDIDATES</span></header>
     <section className="instrument-body">
       <aside className="browser-panel">
         <div className="panel-title">BROWSER <span>⌄</span></div>
@@ -200,13 +270,14 @@ export default function Home() {
       <section className="map-panel">
         <CandidateField state={state}/>
         {state.response==='uncertain'&&<div className="field-note uncertain">NOT COMMITTED</div>}
-        {state.screen==='responding'&&<div className="field-note solving">{RESPONSE_LABELS[state.response] || 'APPLYING RESPONSE'} · 2–3 SEC</div>}
-        {state.response==='anchor'&&<div className="field-note anchor-note">ANCHOR PRESERVED · EXPLORATION CONTINUES</div>}
-        {state.response==='select'&&<div className="selection-strip"><b>SELECTION CONFIRMED</b><span>{id}</span></div>}
+        {state.responsePhase==='queued'&&<div className="field-note solving">RESPONSE RECEIVED · PREPARING DISPLAY</div>}
+        {state.responsePhase==='running'&&<div className="field-note solving">{RESPONSE_LABELS[state.response] || 'APPLYING RESPONSE'} · 2.8 SEC</div>}
+        {state.response==='anchor'&&state.responsePhase==='complete'&&<div className="field-note anchor-note">ANCHOR PRESERVED · EXPLORATION CONTINUES</div>}
+        {state.response==='select'&&state.responsePhase==='complete'&&<div className="selection-strip"><b>SELECTION CONFIRMED</b><span>{id}</span></div>}
       </section>
       <aside className="preview-panel">
-        <div className="panel-title">PREVIEW · {id.toUpperCase()} <span>ISO · FRONT · SIDE · TOP</span></div>
-        <ChairModel state={state}/>
+        <div className="panel-title">PREVIEW · {displayId.toUpperCase()} <span>ISO · FRONT · SIDE · TOP</span></div>
+        <PreviewMorph state={state}/>
         <div className="ortho-row"><ChairModel state={state} small/><ChairModel state={{...state,designIndex:state.designIndex+1}} small/><ChairModel state={{...state,designIndex:state.designIndex+2}} small/></div>
         <div className="dimension-grid">{['W','D','H','SEAT'].map((d,i)=><div key={d}><span>{d}</span><strong>{dims[i]} <i>mm</i></strong></div>)}</div>
         <div className="lock-title">COMPONENT LOCKS <b>{state.locked.length} / 5</b></div>
