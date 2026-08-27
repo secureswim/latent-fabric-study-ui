@@ -17,6 +17,21 @@ function seededPoints(count = 1100): Pt[] {
   });
 }
 
+const clamp01 = (value: number) => Math.max(0, Math.min(1, value));
+const ease = (value: number) => 1 - Math.pow(1 - clamp01(value), 3);
+const cursorPoint = (index: number, width: number, height: number) => ({
+  x: width * (.38 + (index % 9) * .035),
+  y: height * (.46 + ((index * 3) % 7) * .022),
+});
+
+const RESPONSE_LABELS: Record<string, string> = {
+  navigate: 'TRAVERSING LATENT NEIGHBOURHOOD', broad: 'EXPANDING SEARCH RADIUS', local: 'REFINING LOCAL CLUSTER',
+  'zoom-out': 'WIDENING LATENT VIEW', anchor: 'PLACING ANCHOR AT CURSOR', 'return-anchor': 'RETURNING TO PRESERVED STATE',
+  branch: 'GENERATING NEW BRANCH', lock: 'PRESERVING BACKREST', unlock: 'RELEASING BACKREST', undo: 'REVERSING LAST MOVE',
+  compare: 'ALIGNING PRESERVED STATES', reset: 'RESTORING INITIAL STATE', history: 'RECONSTRUCTING VISITED PATH',
+  'timeline-branch': 'SWITCHING EXPLORATION PATH', select: 'COMMITTING FINAL SELECTION',
+};
+
 function CandidateField({ state }: { state: StudyState }) {
   const canvas = useRef<HTMLCanvasElement>(null);
   const points = useMemo(() => seededPoints(), []);
@@ -25,30 +40,66 @@ function CandidateField({ state }: { state: StudyState }) {
     if (!el) return;
     const ctx = el.getContext('2d');
     if (!ctx) return;
+    let animationFrame = 0;
     const paint = () => {
       const dpr = Math.min(window.devicePixelRatio || 1, 2);
       const rect = el.getBoundingClientRect();
       el.width = rect.width * dpr; el.height = rect.height * dpr;
       ctx.scale(dpr, dpr); ctx.clearRect(0, 0, rect.width, rect.height);
-      const cx = rect.width * (.38 + (state.designIndex % 9) * .035);
-      const cy = rect.height * (.46 + ((state.designIndex * 3) % 7) * .022);
+      const animating = state.screen === 'responding';
+      const rawProgress = animating ? clamp01((Date.now() - Number(state.responseStartedAt || Date.now())) / Number(state.responseDurationMs || 3000)) : 1;
+      const progress = ease(rawProgress);
+      const from = cursorPoint(Number(state.previousDesignIndex ?? state.designIndex), rect.width, rect.height);
+      const to = cursorPoint(state.designIndex, rect.width, rect.height);
+      const moving = ['navigate','broad','local','zoom-out','return-anchor','undo','reset','timeline-branch'].includes(state.response);
+      const cx = moving ? from.x + (to.x - from.x) * progress : to.x;
+      const cy = moving ? from.y + (to.y - from.y) * progress : to.y;
       points.forEach(p => {
-        const x = p.x * rect.width, y = p.y * rect.height;
+        let x = p.x * rect.width, y = p.y * rect.height;
+        const baseDistance = Math.hypot(x - cx, y - cy);
+        if (state.response === 'broad') { const scale = 1 + progress * .16; x = cx + (x - cx) * scale; y = cy + (y - cy) * scale; }
+        if (state.response === 'zoom-out') { const scale = 1 - progress * .13; x = cx + (x - cx) * scale; y = cy + (y - cy) * scale; }
+        if (state.response === 'local' && baseDistance < 150) { const scale = 1 - progress * .1; x = cx + (x - cx) * scale; y = cy + (y - cy) * scale; }
         const dist = Math.hypot(x - cx, y - cy);
         const near = dist < 115;
-        ctx.fillStyle = `rgba(214,218,223,${near ? Math.min(.72,p.a+.28) : p.a})`;
+        const localBoost = state.response === 'local' && near ? progress * .18 : 0;
+        ctx.fillStyle = `rgba(214,218,223,${near ? Math.min(.82,p.a+.28+localBoost) : p.a})`;
         ctx.beginPath(); ctx.arc(x, y, near ? p.s + .25 : p.s, 0, Math.PI * 2); ctx.fill();
       });
       ctx.lineWidth = 1;
       ctx.strokeStyle = 'rgba(255,159,69,.38)';
       ctx.beginPath(); ctx.moveTo(cx - 170, cy + 76); ctx.quadraticCurveTo(cx - 78, cy + 52, cx, cy); ctx.stroke();
+      if (moving && rawProgress < 1) {
+        ctx.strokeStyle = `rgba(255,159,69,${.25 + progress * .6})`;ctx.lineWidth = 1.5;ctx.setLineDash([4,5]);
+        ctx.beginPath();ctx.moveTo(from.x,from.y);ctx.quadraticCurveTo((from.x+to.x)/2,Math.min(from.y,to.y)-55,to.x,to.y);ctx.stroke();ctx.setLineDash([]);
+      }
       for (let i = 0; i < state.anchors.length; i++) {
-        const ax = rect.width * (.27 + i * .13), ay = rect.height * (.31 + (i % 2) * .22);
+        const anchor = cursorPoint(state.anchors[i], rect.width, rect.height); const ax = anchor.x, ay = anchor.y;
+        const placingCurrent = animating && state.response === 'anchor' && i === state.anchors.length - 1 && state.anchors[i] === state.designIndex;
+        if (placingCurrent) continue;
         ctx.strokeStyle = '#4FA3D1'; ctx.strokeRect(ax - 5, ay - 5, 10, 10);
         ctx.fillStyle = '#8bc8e7'; ctx.font = '10px ui-monospace'; ctx.fillText(`A${i + 1}`, ax + 9, ay + 4);
       }
-      if (state.response === 'select') {
-        ctx.strokeStyle = '#6FBF73'; ctx.lineWidth = 1.5; ctx.strokeRect(cx - 12, cy - 12, 24, 24);
+      if (state.response === 'anchor') {
+        const drop = clamp01(rawProgress / .72); const settle = ease(drop); const ay = cy - (1 - settle) * 105; const size = 8 + settle * 7;
+        ctx.fillStyle = `rgba(79,163,209,${.08 + settle * .18})`;ctx.fillRect(cx-size,ay-size,size*2,size*2);
+        ctx.strokeStyle = '#69b9e3';ctx.lineWidth = 1.5;ctx.strokeRect(cx-size,ay-size,size*2,size*2);
+        ctx.beginPath();ctx.moveTo(cx,ay-size-18);ctx.lineTo(cx,ay-size);ctx.stroke();
+        if (rawProgress > .72) { const pulse = 22 + Math.sin(rawProgress*22)*3;ctx.strokeStyle=`rgba(105,185,227,${1-rawProgress*.55})`;ctx.beginPath();ctx.arc(cx,cy,pulse,0,Math.PI*2);ctx.stroke();ctx.fillStyle='#9bd8f4';ctx.font='10px ui-monospace';ctx.fillText(`A${state.anchors.length} · ${designId(state.designIndex)}`,cx+22,cy-20); }
+      } else if (state.response === 'branch') {
+        const length = 130 * progress;ctx.strokeStyle='#4FA3D1';ctx.lineWidth=1.5;ctx.beginPath();ctx.moveTo(cx,cy);ctx.quadraticCurveTo(cx+length*.42,cy-58*progress,cx+length,cy-38*progress);ctx.stroke();
+        ctx.strokeStyle='rgba(255,159,69,.75)';ctx.beginPath();ctx.moveTo(cx,cy);ctx.quadraticCurveTo(cx+length*.38,cy+45*progress,cx+length*.82,cy+54*progress);ctx.stroke();
+      } else if (state.response === 'lock' || state.response === 'unlock') {
+        const closing = state.response === 'lock' ? progress : 1-progress; const span = 46 - closing*20;ctx.strokeStyle=state.response==='lock'?'#6FBF73':'#FF9F45';ctx.lineWidth=2;
+        ctx.beginPath();ctx.moveTo(cx-span,cy-22);ctx.lineTo(cx-span,cy+22);ctx.moveTo(cx+span,cy-22);ctx.lineTo(cx+span,cy+22);ctx.stroke();
+        ctx.strokeRect(cx-7,cy-2,14,12);ctx.beginPath();ctx.arc(cx,cy-2,6,Math.PI,0);ctx.stroke();
+      } else if (state.response === 'compare') {
+        const candidates = state.anchors.slice(-2).map(a=>cursorPoint(a,rect.width,rect.height));if(candidates.length<2)candidates.push({x:cx+100,y:cy-55},{x:cx-100,y:cy+45});
+        const a=candidates[0],b=candidates[1];ctx.strokeStyle=`rgba(79,163,209,${.3+.7*progress})`;ctx.setLineDash([6,4]);ctx.beginPath();ctx.moveTo(a.x,a.y);ctx.lineTo(b.x,b.y);ctx.stroke();ctx.setLineDash([]);[a,b].forEach((pt,i)=>{ctx.strokeRect(pt.x-16*progress,pt.y-16*progress,32*progress,32*progress);ctx.fillStyle='#8bc8e7';ctx.fillText(`A${i+1}`,pt.x+20,pt.y)});
+      } else if (state.response === 'history' || state.response === 'timeline-branch') {
+        ctx.strokeStyle=state.response==='timeline-branch'?'#4FA3D1':'rgba(255,159,69,.82)';ctx.lineWidth=1.5;ctx.beginPath();for(let i=0;i<7;i++){const t=i/6*progress;const x=cx-150+t*300,y=cy+Math.sin(t*Math.PI*3)*38;if(i===0)ctx.moveTo(x,y);else ctx.lineTo(x,y)}ctx.stroke();
+      } else if (state.response === 'select') {
+        const size=12+progress*20;ctx.strokeStyle='#6FBF73';ctx.lineWidth=1.5;ctx.strokeRect(cx-size,cy-size,size*2,size*2);ctx.strokeStyle=`rgba(111,191,115,${1-progress*.5})`;ctx.beginPath();ctx.arc(cx,cy,18+progress*35,0,Math.PI*2);ctx.stroke();
       } else if (state.response === 'uncertain') {
         ctx.setLineDash([5,5]); ctx.strokeStyle = 'rgba(214,218,223,.65)'; ctx.beginPath(); ctx.arc(cx, cy, 24, 0, Math.PI*2); ctx.stroke(); ctx.setLineDash([]);
       } else {
@@ -60,8 +111,10 @@ function CandidateField({ state }: { state: StudyState }) {
         ctx.beginPath(); ctx.moveTo(cx-25,cy);ctx.lineTo(cx+25,cy);ctx.moveTo(cx,cy-25);ctx.lineTo(cx,cy+25);ctx.stroke();
         ctx.fillStyle='#FF9F45';ctx.beginPath();ctx.arc(cx,cy,2.4,0,Math.PI*2);ctx.fill();
       }
+      if (state.response === 'reset' && animating) {ctx.fillStyle=`rgba(10,12,14,${Math.sin(rawProgress*Math.PI)*.5})`;ctx.fillRect(0,0,rect.width,rect.height)}
+      if (animating && rawProgress < 1) animationFrame = window.requestAnimationFrame(paint);
     };
-    paint(); const obs = new ResizeObserver(paint); obs.observe(el); return () => obs.disconnect();
+    paint(); const obs = new ResizeObserver(paint); obs.observe(el); return () => { obs.disconnect(); window.cancelAnimationFrame(animationFrame); };
   }, [points, state]);
   return <canvas ref={canvas} className="candidate-canvas" aria-label="Continuous field of generated design candidates" />;
 }
@@ -147,7 +200,7 @@ export default function Home() {
       <section className="map-panel">
         <CandidateField state={state}/>
         {state.response==='uncertain'&&<div className="field-note uncertain">NOT COMMITTED</div>}
-        {state.screen==='responding'&&<div className="field-note solving">SOLVING</div>}
+        {state.screen==='responding'&&<div className="field-note solving">{RESPONSE_LABELS[state.response] || 'APPLYING RESPONSE'} · 2–3 SEC</div>}
         {state.response==='anchor'&&<div className="field-note anchor-note">ANCHOR PRESERVED · EXPLORATION CONTINUES</div>}
         {state.response==='select'&&<div className="selection-strip"><b>SELECTION CONFIRMED</b><span>{id}</span></div>}
       </section>

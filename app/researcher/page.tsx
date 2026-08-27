@@ -39,6 +39,7 @@ export default function ResearcherPage(){
   const channel=useRef<BroadcastChannel|null>(null);
   const stateRef=useRef(state); const logRef=useRef(log); const logsRef=useRef(logs);
   const remoteTimer=useRef<number|undefined>(undefined);
+  const responseTimer=useRef<number|undefined>(undefined);
 
   const publishState=(next:StudyState)=>{
     stateRef.current=next; setStateRaw(next); localStorage.setItem(STORAGE_KEY,JSON.stringify(next));
@@ -82,7 +83,7 @@ export default function ResearcherPage(){
     if(savedState){const restored={...DEFAULT_STATE,...JSON.parse(savedState)} as StudyState;stateRef.current=restored;setStateRaw(restored);if(savedLogs){const parsed=JSON.parse(savedLogs);logsRef.current=parsed;setLogs(parsed);const selected=parsed[String(restored.currentTrial)]||emptyLog();logRef.current=selected;setLog(selected)}}
     loadRecent();setNow(Date.now());const clock=window.setInterval(()=>setNow(Date.now()),1000);
     const backup=window.setInterval(()=>{if(stateRef.current.sessionId)persistSnapshot('draft')},10000);
-    return()=>{window.clearInterval(clock);window.clearInterval(backup);if(remoteTimer.current)window.clearTimeout(remoteTimer.current);channel.current?.close()};
+    return()=>{window.clearInterval(clock);window.clearInterval(backup);if(remoteTimer.current)window.clearTimeout(remoteTimer.current);if(responseTimer.current)window.clearTimeout(responseTimer.current);channel.current?.close()};
   },[]);
 
   const storeDraft=(nextLog:TrialLog,trial=stateRef.current.currentTrial,queue=true)=>{
@@ -109,6 +110,7 @@ export default function ResearcherPage(){
     }catch{setStorageState('offline')}};
 
   const selectTrial=async(index:number)=>{
+    if(responseTimer.current)window.clearTimeout(responseTimer.current);
     const previous=stateRef.current;const currentDuration=trialElapsed();const currentDraft={...logRef.current,trialDurationMs:currentDuration,status:logRef.current.status==='completed'?'completed':logRef.current.status==='not-started'?'not-started':logRef.current.status==='response-triggered'?'response-triggered':'draft'};
     if(remoteTimer.current)window.clearTimeout(remoteTimer.current);storeDraft(currentDraft,previous.currentTrial,false);
     const selected=logsRef.current[String(index)]||emptyLog();logRef.current=selected;setLog(selected);
@@ -119,7 +121,7 @@ export default function ResearcherPage(){
   const startTrial=()=>{
     if(stateRef.current.trialRunning||logRef.current.status==='completed'||logRef.current.status==='response-triggered')return;
     const at=Date.now();const startedLog={...logRef.current,status:'running',trialStartedAt:logRef.current.trialStartedAt||at};storeDraft(startedLog);
-    const started={...stateRef.current,screen:'trial' as const,response:'idle' as const,overlayVisible:false,trialRunning:true,trialStartedAt:at,trialAccumulatedMs:Number(startedLog.trialDurationMs||0)};publishState(started);persistSnapshot('draft',startedLog,started);
+    const started={...stateRef.current,screen:'trial' as const,response:'idle' as const,responseStartedAt:0,overlayVisible:false,trialRunning:true,trialStartedAt:at,trialAccumulatedMs:Number(startedLog.trialDurationMs||0)};publishState(started);persistSnapshot('draft',startedLog,started);
   };
 
   const trigger=()=>{
@@ -127,8 +129,9 @@ export default function ResearcherPage(){
     const s=stateRef.current;if(!s.trialRunning)return;
     const at=Date.now();const duration=trialElapsed(s,logRef.current,at);const triggeredLog={...logRef.current,trialDurationMs:duration,status:'response-triggered'};
     if(remoteTimer.current)window.clearTimeout(remoteTimer.current);storeDraft(triggeredLog,s.currentTrial,false);
-    let anchors=s.anchors,locked=s.locked,branch=s.branch,designIndex=s.designIndex;if(response==='anchor'&&!anchors.includes(designIndex))anchors=[...anchors,designIndex];if(response==='lock'&&!locked.includes('Backrest'))locked=[...locked,'Backrest'];if(response==='unlock')locked=[];if(response==='branch')branch=`b${Number(s.branch.slice(1)||0)+1}`;if(['navigate','broad','local','zoom-out'].includes(response))designIndex=(designIndex+({navigate:2,broad:9,local:1,'zoom-out':6} as Record<string,number>)[response])%28;
-    const responding={...s,response,screen:'responding' as const,overlayVisible:false,trialRunning:false,trialStartedAt:0,trialAccumulatedMs:duration,anchors,locked,branch,designIndex};publishState(responding);persistSnapshot('draft',triggeredLog,responding);window.setTimeout(()=>{const completed={...stateRef.current,screen:'response-complete' as const};publishState(completed);persistSnapshot('draft',logRef.current,completed)},850);
+    let anchors=s.anchors,locked=s.locked,branch=s.branch,designIndex=s.designIndex;const previousDesignIndex=s.designIndex;if(response==='anchor'&&!anchors.includes(designIndex))anchors=[...anchors,designIndex];if(response==='return-anchor'&&anchors.length)designIndex=anchors[anchors.length-1];if(response==='lock'&&!locked.includes('Backrest'))locked=[...locked,'Backrest'];if(response==='unlock')locked=[];if(response==='branch')branch=`b${Number(s.branch.slice(1)||0)+1}`;if(response==='reset')designIndex=8;if(response==='undo')designIndex=s.previousDesignIndex??Math.max(0,designIndex-2);if(response==='timeline-branch')designIndex=(designIndex+5)%28;if(['navigate','broad','local','zoom-out'].includes(response))designIndex=(designIndex+({navigate:2,broad:9,local:1,'zoom-out':6} as Record<string,number>)[response])%28;
+    const responseDurationMs=3000;const responding={...s,response,screen:'responding' as const,responseStartedAt:at,responseDurationMs,previousDesignIndex,overlayVisible:false,trialRunning:false,trialStartedAt:0,trialAccumulatedMs:duration,anchors,locked,branch,designIndex};publishState(responding);persistSnapshot('draft',triggeredLog,responding);
+    if(responseTimer.current)window.clearTimeout(responseTimer.current);responseTimer.current=window.setTimeout(()=>{const current=stateRef.current;if(current.currentTrial!==s.currentTrial||current.screen!=='responding'||current.responseStartedAt!==at)return;const completed={...current,screen:'response-complete' as const};publishState(completed);persistSnapshot('draft',logRef.current,completed)},responseDurationMs);
   };
 
   const pauseResume=()=>{
@@ -140,6 +143,7 @@ export default function ResearcherPage(){
 
   const saveNext=async()=>{
     if(stateRef.current.sessionStatus==='completed')return;
+    if(responseTimer.current)window.clearTimeout(responseTimer.current);
     const at=Date.now();const duration=trialElapsed(stateRef.current,logRef.current,at);const completed={...logRef.current,trialDurationMs:duration,status:'completed'};
     if(remoteTimer.current)window.clearTimeout(remoteTimer.current);
     storeDraft(completed,stateRef.current.currentTrial,false);
@@ -206,7 +210,7 @@ export default function ResearcherPage(){
       <section className="study-controls">
         <div className="referent-card"><div className="referent-meta"><span>TASK {String(state.currentTrial+1).padStart(2,'0')} / 15 · TIER {ref.tier}</span><strong>{ref.label}</strong></div><p>Participant prompt: “{ref.prompt}”</p><div className="task-timing"><span>TRIAL TIME</span><b>{formatDuration(trialTime)}</b><small>{state.trialRunning?'RUNNING':log.status==='completed'?'SAVED':log.status==='response-triggered'?'RESPONSE CAPTURED':'READY'}</small></div></div>
         <div className="workflow-card simplified-workflow"><div className="console-title">TRIAL CONTROL</div><button className="start-trial" disabled={state.trialRunning||log.status==='completed'||log.status==='response-triggered'} onClick={startTrial}>{log.status==='completed'?'TRIAL SAVED':log.status==='response-triggered'?'RESPONSE CAPTURED':state.trialRunning?'TRIAL IN PROGRESS':'START TRIAL'}</button><button className="primary-trigger" disabled={!state.trialRunning} onClick={trigger}>TRIGGER RESPONSE</button><p>Starting the trial begins timing. Triggering the response stops and stores the trial time while you complete the observation form.</p></div>
-        <div className="transport"><button onClick={()=>selectTrial(Math.max(0,state.currentTrial-1))}>← PREVIOUS</button><button disabled={state.sessionStatus==='completed'} onClick={pauseResume}>{state.sessionStatus==='completed'?'SESSION COMPLETE':state.recording?'PAUSE SESSION':'RESUME SESSION'}</button><button className={state.currentTrial===14?'next finish-study':'next'} disabled={state.sessionStatus==='completed'} onClick={saveNext}>{state.sessionStatus==='completed'?'PARTICIPANT COMPLETE':state.currentTrial===14?'COMPLETE PARTICIPANT STUDY ✓':'SAVE + NEXT TRIAL →'}</button></div>
+        <div className="transport"><button onClick={()=>selectTrial(Math.max(0,state.currentTrial-1))}>← PREVIOUS</button><button disabled={state.sessionStatus==='completed'} onClick={pauseResume}>{state.sessionStatus==='completed'?'SESSION COMPLETE':state.recording?'PAUSE SESSION':'RESUME SESSION'}</button><button className={state.currentTrial===14?'next finish-study':'next'} disabled={state.sessionStatus==='completed'||state.screen==='responding'} onClick={saveNext}>{state.sessionStatus==='completed'?'PARTICIPANT COMPLETE':state.screen==='responding'?'APPLYING RESPONSE…':state.currentTrial===14?'COMPLETE PARTICIPANT STUDY ✓':'SAVE + NEXT TRIAL →'}</button></div>
       </section>
       <ObservationPanel log={log} updateLog={updateLog}/>
     </div>

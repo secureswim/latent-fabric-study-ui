@@ -51,6 +51,9 @@ export type StudyState = {
   screen: ScreenMode;
   currentTrial: number;
   response: ResponseKind;
+  responseStartedAt: number;
+  responseDurationMs: number;
+  previousDesignIndex: number;
   designIndex: number;
   branch: string;
   anchors: number[];
@@ -76,6 +79,9 @@ export const DEFAULT_STATE: StudyState = {
   screen: 'welcome',
   currentTrial: 0,
   response: 'idle',
+  responseStartedAt: 0,
+  responseDurationMs: 3000,
+  previousDesignIndex: 8,
   designIndex: 8,
   branch: 'b0',
   anchors: [],
