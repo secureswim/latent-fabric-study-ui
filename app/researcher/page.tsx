@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { CHANNEL_NAME, currentReferent, DEFAULT_STATE, designId, LatentSnapshot, LOG_KEY, REFERENTS, ResponseKind, SEQUENCES, STORAGE_KEY, StudyState } from '../study';
+import { latentSnapshot, responseTarget } from '../study';
 
 type TrialLog = Record<string, string | number | boolean> & {
   trialDurationMs: number;
@@ -62,34 +63,46 @@ export default function ResearcherPage(){
         status:status==='completed'?'completed':l.status,data:l,durationMs:l.status==='running'?trialElapsed(trialState,l):Number(l.trialDurationMs||0),startedAt:l.trialStartedAt||trialState.trialStartedAt||0}
       })});
       if(!response.ok)throw new Error('save failed');setStorageState('saved');setSavedAt(Date.now());
+      const payload=await response.json() as {state?:StudyState};return payload.state;
     }catch{setStorageState('offline')}
   };
 
   const persistSnapshot=async(status='draft',providedLog?:TrialLog,providedState?:StudyState)=>{
     const s=providedState||stateRef.current;
     const l=providedLog||logRef.current;
-    await persistTrialWithSession(status,l,s,s);
+    return await persistTrialWithSession(status,l,s,s);
   };
 
   const queueRemoteSave=(nextLog:TrialLog,nextState=stateRef.current)=>{
     if(remoteTimer.current)window.clearTimeout(remoteTimer.current);
-    remoteTimer.current=window.setTimeout(()=>persistSnapshot('draft',nextLog,nextState),650);
+    remoteTimer.current=window.setTimeout(()=>{const latest=stateRef.current;if(latest.sessionId===nextState.sessionId&&latest.currentTrial===nextState.currentTrial)persistSnapshot('draft',nextLog,latest)},650);
   };
 
   useEffect(()=>{
     channel.current=new BroadcastChannel(CHANNEL_NAME);
+    channel.current.onmessage=e=>{
+      const s=stateRef.current,h=e.data?.state;
+      if(e.data?.type==='exploration'&&h?.sessionId===s.sessionId&&h.currentTrial===s.currentTrial&&s.trialRunning&&s.responsePhase==='idle'&&Number(h.explorationRevision||0)>Number(s.explorationRevision||0)){
+        const next={...s,designIndex:h.designIndex,previousDesignIndex:h.previousDesignIndex,visitedDesigns:h.visitedDesigns,explorationRevision:h.explorationRevision};stateRef.current=next;setStateRaw(next);
+      }
+    };
     const savedState=localStorage.getItem(STORAGE_KEY);const savedLogs=localStorage.getItem(LOG_KEY);
     if(savedState){const restored={...DEFAULT_STATE,...JSON.parse(savedState)} as StudyState;if(savedLogs){const parsed=JSON.parse(savedLogs);logsRef.current=parsed;setLogs(parsed);const selected=parsed[String(restored.currentTrial)]||emptyLog();if(selected.status==='response-triggered'&&restored.responsePhase==='idle'){restored.responsePhase='complete';restored.screen='response-complete'}logRef.current=selected;setLog(selected)}stateRef.current=restored;setStateRaw(restored)}
     loadRecent();setNow(Date.now());const clock=window.setInterval(()=>setNow(Date.now()),1000);
     const backup=window.setInterval(()=>{if(stateRef.current.sessionId)persistSnapshot('draft')},10000);
     const animationPoll=window.setInterval(async()=>{
       const current=stateRef.current;
-      if(!current.sessionId||!['queued','running'].includes(current.responsePhase))return;
+      if(!current.sessionId||(!current.trialRunning&&!['queued','running'].includes(current.responsePhase)))return;
       try{
         const response=await fetch(`/api/sessions?id=${encodeURIComponent(current.sessionId)}`,{cache:'no-store'});
         if(!response.ok)return;
         const payload:any=await response.json();
         const hosted={...DEFAULT_STATE,...JSON.parse(payload.session.stateJson)} as StudyState;
+        if(current.trialRunning&&hosted.currentTrial===current.currentTrial&&Number(hosted.explorationRevision||0)>Number(current.explorationRevision||0)){
+          const latest=stateRef.current;
+          if(latest.trialRunning&&latest.currentTrial===current.currentTrial){const next={...latest,designIndex:hosted.designIndex,previousDesignIndex:hosted.previousDesignIndex,visitedDesigns:hosted.visitedDesigns,explorationRevision:hosted.explorationRevision};stateRef.current=next;setStateRaw(next)}
+          return;
+        }
         if(hosted.animationId!==current.animationId||hosted.responsePhase===current.responsePhase)return;
         publishState({...current,...hosted});
       }catch{/* Participant and local BroadcastChannel remain available offline. */}
@@ -136,26 +149,24 @@ export default function ResearcherPage(){
     const started={...s,screen:'trial' as const,response:'idle' as const,animationId:'',responsePhase:'idle' as const,responseStartedAt:0,responseCompletedAt:0,responseFrom:snapshot,responseTarget:snapshot,overlayVisible:false,trialRunning:true,trialStartedAt:at,trialAccumulatedMs:Number(startedLog.trialDurationMs||0)};publishState(started);persistSnapshot('draft',startedLog,started);
   };
 
-  const trigger=()=>{
+  const trigger=async()=>{
     const ref=currentReferent(stateRef.current);const response=(ref.id==='explore-broadly'?'broad':ref.id==='refine-locally'?'local':ref.id==='zoom-out'?'zoom-out':ref.id==='anchor'?'anchor':ref.id==='return-anchor'?'return-anchor':ref.id==='branch'?'branch':ref.id==='lock'?'lock':ref.id==='unlock'?'unlock':ref.id==='undo'?'undo':ref.id==='compare'?'compare':ref.id==='reset'?'reset':ref.id==='history'?'history':ref.id==='switch-branch'?'timeline-branch':ref.id==='select'?'select':'navigate') as ResponseKind;
     const s=stateRef.current;if(!s.trialRunning)return;
     const at=Date.now();const duration=trialElapsed(s,logRef.current,at);const triggeredLog={...logRef.current,trialDurationMs:duration,status:'response-triggered'};
     if(remoteTimer.current)window.clearTimeout(remoteTimer.current);storeDraft(triggeredLog,s.currentTrial,false);
-    const from:LatentSnapshot={designIndex:s.designIndex,branch:s.branch,anchors:[...s.anchors],locked:[...s.locked],visitedDesigns:[...(s.visitedDesigns||[s.designIndex])]};
-    let anchors=[...from.anchors],locked=[...from.locked],branch=from.branch,designIndex=from.designIndex;
-    if(response==='anchor'&&!anchors.includes(designIndex))anchors.push(designIndex);
-    if(response==='return-anchor'&&anchors.length)designIndex=anchors[anchors.length-1];
-    if(response==='lock'&&!locked.includes('Backrest'))locked.push('Backrest');
-    if(response==='unlock')locked=[];
-    if(response==='branch'){branch=`b${Number(s.branch.slice(1)||0)+1}`;designIndex=(designIndex+3)%28;}
-    if(response==='reset')designIndex=8;
-    if(response==='undo')designIndex=from.visitedDesigns.at(-2)??s.previousDesignIndex??Math.max(0,designIndex-2);
-    if(response==='timeline-branch'){designIndex=(designIndex+5)%28;branch=branch==='b0'?'b1':'b0';}
-    if(['navigate','broad','local','zoom-out'].includes(response))designIndex=(designIndex+({navigate:2,broad:9,local:1,'zoom-out':6} as Record<string,number>)[response])%28;
-    const visitedDesigns=designIndex===from.designIndex||from.visitedDesigns.at(-1)===designIndex?[...from.visitedDesigns]:[...from.visitedDesigns,designIndex];
-    const target:LatentSnapshot={designIndex,branch,anchors,locked,visitedDesigns};
+    const from=latentSnapshot(s);
+    const target=responseTarget(s,response);
     const queued:StudyState={...s,response,animationId:crypto.randomUUID(),responsePhase:'queued',screen:'responding',responseStartedAt:0,responseDurationMs:2800,responseCompletedAt:0,responseFrom:from,responseTarget:target,previousDesignIndex:from.designIndex,overlayVisible:false,trialRunning:false,trialStartedAt:0,trialAccumulatedMs:duration};
-    publishState(queued);persistSnapshot('draft',triggeredLog,queued);
+    stateRef.current=queued;setStateRaw(queued);
+    const saved=await persistSnapshot('draft',triggeredLog,queued);
+    if(saved&&stateRef.current.animationId===queued.animationId){
+      const latest=stateRef.current;
+      if(latest.responsePhase==='queued')publishState(saved);
+    }
+    else if(!saved&&stateRef.current.animationId===queued.animationId){
+      const retry={...triggeredLog,status:'paused'};storeDraft(retry,s.currentTrial,false);
+      publishState({...s,trialRunning:false,trialStartedAt:0,trialAccumulatedMs:duration});
+    }
   };
 
   const pauseResume=()=>{

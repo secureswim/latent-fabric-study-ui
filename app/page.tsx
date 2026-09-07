@@ -162,6 +162,33 @@ export default function Home() {
   const acknowledgedStart = useRef('');
   const acknowledgedComplete = useRef('');
   const completionTimer = useRef<number | undefined>(undefined);
+  const explorationQueue=useRef<{index:number;sessionId:string;currentTrial:number;trialStartedAt:number}|null>(null);
+  const explorationBusy=useRef(false);
+  const [explorationError,setExplorationError]=useState('');
+  const sendExploration=async()=>{
+    if(explorationBusy.current)return;
+    explorationBusy.current=true;
+    try {
+      while(explorationQueue.current){
+        const move=explorationQueue.current;explorationQueue.current=null;
+        const response=await fetch('/api/sessions',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({action:'explore',...move,designIndex:move.index})});
+        const payload=await response.json() as {state?:StudyState;error?:string};
+        if(!response.ok){if(payload.state){explorationQueue.current=null;applyState(payload.state)}throw new Error(payload.error||'Position could not be saved')}
+        if(payload.state&&stateRef.current.sessionId===move.sessionId&&stateRef.current.trialStartedAt===move.trialStartedAt&&stateRef.current.responsePhase==='idle'){
+          if(!explorationQueue.current)applyState(payload.state);
+          const channel=new BroadcastChannel(CHANNEL_NAME);channel.postMessage({type:'exploration',state:payload.state});channel.close();
+        }
+        setExplorationError('');
+      }
+    }catch{setExplorationError('Position not synchronized — move again to retry before triggering the response.')}finally{explorationBusy.current=false}
+  };
+  const explore=(index:number)=>{
+    const s=stateRef.current;if(!s.trialRunning||!s.recording||s.overlayVisible||s.responsePhase!=='idle'||index===s.designIndex)return;
+    pendingLocalState.current=null;
+    applyState({...s,designIndex:index});
+    explorationQueue.current={index,sessionId:s.sessionId,currentTrial:s.currentTrial,trialStartedAt:s.trialStartedAt};
+    void sendExploration();
+  };
   const applyState = (next: StudyState) => {
     const normalized = {...DEFAULT_STATE,...next} as StudyState;
     stateRef.current = normalized;
@@ -194,11 +221,12 @@ export default function Home() {
         if (payload.session?.stateJson) {
           const hosted = JSON.parse(payload.session.stateJson) as StudyState;
           const current=stateRef.current;
+          if((explorationBusy.current||explorationQueue.current)&&hosted.sessionId===current.sessionId&&hosted.currentTrial===current.currentTrial&&hosted.trialRunning&&hosted.responsePhase==='idle')return;
           if(current.animationId&&current.animationId===hosted.animationId&&current.responsePhase==='running'&&hosted.responsePhase==='queued')return;
           const pending = pendingLocalState.current;
           if (pending && signature(hosted) !== pending) return;
-          if(signature(hosted)===signature(current))return;
           pendingLocalState.current = null;
+          if(signature(hosted)===signature(current))return;
           applyState(hosted);
         }
       } catch { /* The local same-browser channel remains available offline. */ }
@@ -256,7 +284,9 @@ export default function Home() {
         <div className="browser-stats"><span>STEPS {String(state.currentTrial+2).padStart(2,'0')}</span><span>BRANCHES {state.branch==='b0'?1:2}</span></div>
       </aside>
       <section className="map-panel">
-        <CandidateField state={state}/>
+        <CandidateField state={state} onExplore={explore}/>
+        {state.trialRunning&&!state.overlayVisible&&<div className="field-note" style={{pointerEvents:'none'}}>CLICK OR DRAG TO EXPLORE</div>}
+        {explorationError&&<div role="alert" className="field-note">{explorationError}</div>}
         {state.response==='uncertain'&&<div className="field-note uncertain">NOT COMMITTED</div>}
         {state.responsePhase==='queued'&&<div className="field-note solving">RESPONSE RECEIVED · PREPARING DISPLAY</div>}
         {state.responsePhase==='running'&&<div className="field-note solving">{RESPONSE_LABELS[state.response] || 'APPLYING RESPONSE'} · 2.8 SEC</div>}
@@ -266,7 +296,7 @@ export default function Home() {
       <aside className="preview-panel">
         <div className="panel-title">PREVIEW · {displayId.toUpperCase()} <span>ISO · FRONT · SIDE · TOP</span></div>
         <PreviewMorph state={state}/>
-        <div className="ortho-row"><PointCloudPreview state={state} small/><PointCloudPreview state={{...state,designIndex:(state.designIndex+1)%28}} small/><PointCloudPreview state={{...state,designIndex:(state.designIndex+2)%28}} small/></div>
+        <div className="ortho-row"><PointCloudPreview state={state} small view="front"/><PointCloudPreview state={state} small view="side"/><PointCloudPreview state={state} small view="top"/></div>
         <div className="dimension-grid">{['W','D','H','SEAT'].map((d,i)=><div key={d}><span>{d}</span><strong>{dims[i]} <i>mm</i></strong></div>)}</div>
         <div className="lock-title">COMPONENT LOCKS <b>{state.locked.length} / 5</b></div>
         {['Headrest','Backrest','Seat','Armrests','Legs / base'].map(p=><div className={`lock-row ${state.locked.includes(p)?'is-locked':''}`} key={p}><span>{p}</span><b>{state.locked.includes(p)?'LOCKED':'FREE'}</b></div>)}

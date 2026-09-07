@@ -1,0 +1,29 @@
+import assert from 'node:assert/strict';
+const base='http://localhost:3002';
+async function post(body){const r=await fetch(`${base}/api/sessions`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});return {status:r.status,...await r.json()}}
+const live=await (await fetch(`${base}/api/sessions?live=1`)).json();
+const state=JSON.parse(live.session.stateJson);
+Object.assign(state,{sessionId:'',participantId:'EXPLORATION-QA',sessionStatus:'active',currentTrial:4,sequence:'A',setupComplete:true,screen:'trial',response:'idle',animationId:'',responsePhase:'idle',recording:true,trialRunning:true,overlayVisible:false,trialStartedAt:Date.now(),sessionStartedAt:Date.now(),sessionRunStartedAt:Date.now(),sessionAccumulatedMs:0,trialAccumulatedMs:0,designIndex:8,previousDesignIndex:8,anchors:[],locked:[],visitedDesigns:[8],explorationRevision:0});
+state.responseFrom=state.responseTarget={designIndex:8,branch:'b0',anchors:[],locked:[],visitedDesigns:[8]};
+const created=await post({action:'create',participantId:state.participantId,state});state.sessionId=created.id;
+const save=(s)=>post({action:'autosave',sessionId:s.sessionId,sessionStatus:s.sessionStatus,currentTrial:s.currentTrial,state:s});
+assert.equal((await save(state)).status,200);
+const index=1_000_000+6500*10001+4200;
+const explored=await post({action:'explore',sessionId:state.sessionId,currentTrial:4,trialStartedAt:state.trialStartedAt,designIndex:index});
+assert.equal(explored.state.designIndex,index);
+assert.equal(explored.state.explorationRevision,1);
+assert.equal((await save(state)).state.designIndex,index,'stale autosave must preserve exploration');
+const queued={...state,trialRunning:false,response:'anchor',responsePhase:'queued',animationId:crypto.randomUUID(),screen:'responding',responseTarget:{...state.responseTarget,anchors:[8]}};
+const triggered=await save(queued);
+assert.equal(triggered.state.responseFrom.designIndex,index);
+assert.deepEqual(triggered.state.responseTarget.anchors,[index],'anchor must use latest persisted position');
+const late=await post({action:'explore',sessionId:state.sessionId,currentTrial:4,trialStartedAt:state.trialStartedAt,designIndex:index+10});
+assert.equal(late.status,409,'late drag cannot overwrite triggered response');
+assert.equal((await post({action:'explore',sessionId:state.sessionId,designIndex:NaN})).status,400);
+const done=await post({action:'animation-ack',sessionId:state.sessionId,animationId:queued.animationId,phase:'complete'});
+assert.equal(done.state.anchors[0],index);
+const reload=await (await fetch(`${base}/api/sessions?id=${state.sessionId}`)).json();
+assert.equal(JSON.parse(reload.session.stateJson).designIndex,index,'position survives reload');
+// Leave this local-only QA session ready for browser pointer checks.
+await save({...done.state,trialRunning:true,trialStartedAt:Date.now(),response:'idle',responsePhase:'idle',animationId:'',screen:'trial'});
+console.log('PASS: exploration, stale autosave, anchor-at-cursor, late-drag rejection, validation, reload');

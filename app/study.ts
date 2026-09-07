@@ -1,3 +1,5 @@
+import { movePosition } from './latent-position';
+
 export type ScreenMode =
   | 'welcome' | 'familiarization' | 'practice' | 'trial' | 'captured'
   | 'responding' | 'response-complete' | 'question-why' | 'question-expect'
@@ -50,6 +52,7 @@ export const SEQUENCES: Record<string, number[]> = {
 };
 
 export type StudyState = {
+  explorationRevision?: number;
   sessionId: string;
   sessionStatus: 'active' | 'paused' | 'completed';
   setupComplete: boolean;
@@ -129,5 +132,27 @@ export function currentReferent(state: StudyState): Referent {
 }
 
 export function designId(index: number) {
+  if (index >= 1_000_000) return `p_${index.toString(36)}`;
   return `d_${((index * 1103 + 0x8c4) % 0xffff).toString(16).padStart(4, '0')}`;
+}
+
+export function latentSnapshot(s: StudyState): LatentSnapshot {
+  return {designIndex:s.designIndex,branch:s.branch,anchors:[...s.anchors],locked:[...s.locked],visitedDesigns:[...(s.visitedDesigns||[s.designIndex])]};
+}
+
+export function responseTarget(s: StudyState, response: ResponseKind): LatentSnapshot {
+  const target = latentSnapshot(s);
+  const id = s.designIndex;
+  if (response === 'anchor' && !target.anchors.includes(id)) target.anchors.push(id);
+  if (response === 'return-anchor' && target.anchors.length) target.designIndex = target.anchors.at(-1)!;
+  if (response === 'lock' && !target.locked.includes('Backrest')) target.locked.push('Backrest');
+  if (response === 'unlock') target.locked = [];
+  if (response === 'branch') { target.branch = `b${Number(s.branch.slice(1)||0)+1}`; target.designIndex = movePosition(id,.06,.05,3); }
+  if (response === 'reset') target.designIndex = 8;
+  if (response === 'undo') target.designIndex = target.visitedDesigns.at(-2) ?? s.previousDesignIndex ?? 8;
+  if (response === 'timeline-branch') { target.designIndex = movePosition(id,-.12,.09,5); target.branch = s.branch === 'b0' ? 'b1' : 'b0'; }
+  const moves: Partial<Record<ResponseKind,[number,number,number]>> = {navigate:[.07,.02,2],broad:[-.2,.18,9],local:[.012,.008,1]};
+  const move=moves[response]; if(move) target.designIndex=movePosition(id,...move);
+  if(target.designIndex!==id) target.visitedDesigns.push(target.designIndex);
+  return target;
 }

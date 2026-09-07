@@ -2,6 +2,8 @@ import { and, desc, eq } from 'drizzle-orm';
 import { NextRequest, NextResponse } from 'next/server';
 import { ensureSchema, getDb } from '../../../db';
 import { studySessions, studyTrials } from '../../../db/schema';
+import { latentSnapshot, responseTarget } from '../../study';
+import { validPositionId } from '../../latent-position';
 
 export const dynamic = 'force-dynamic';
 
@@ -65,23 +67,52 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ id });
   }
 
+  if (body.action === 'explore') {
+    if(!validPositionId(body.designIndex)) return NextResponse.json({error:'Invalid position'}, {status:400});
+    for(let attempt=0;attempt<5;attempt++) {
+      const [session]=await db.select().from(studySessions).where(eq(studySessions.id,String(body.sessionId))).limit(1);
+      if(!session)return NextResponse.json({error:'Session not found'},{status:404});
+      const state=JSON.parse(session.stateJson);
+      if(session.status!=='active'||!state.trialRunning||!state.recording||state.overlayVisible||state.responsePhase!=='idle'||state.currentTrial!==body.currentTrial||state.trialStartedAt!==body.trialStartedAt)
+        return NextResponse.json({error:'Trial is no longer open for exploration',state},{status:409});
+      const history=[...(state.visitedDesigns||[state.designIndex])];
+      if(history.at(-1)!==body.designIndex)history.push(body.designIndex);
+      const next={...state,previousDesignIndex:state.designIndex,designIndex:body.designIndex,visitedDesigns:history,explorationRevision:Number(state.explorationRevision||0)+1};
+      next.responseFrom=latentSnapshot(next);next.responseTarget=latentSnapshot(next);
+      const updated=await db.update(studySessions).set({stateJson:JSON.stringify(next),updatedAt:now}).where(and(eq(studySessions.id,session.id),eq(studySessions.stateJson,session.stateJson))).returning({id:studySessions.id});
+      if(updated.length)return NextResponse.json({state:next});
+    }
+    return NextResponse.json({error:'Concurrent update; retry exploration'},{status:409});
+  }
+
   if (body.action === 'autosave') {
     const sessionId = String(body.sessionId || '');
     if (!sessionId) return NextResponse.json({ error: 'Missing session id' }, { status: 400 });
-    const [existing] = await db.select({ status: studySessions.status }).from(studySessions).where(eq(studySessions.id, sessionId)).limit(1);
+    let saved=false;
+    for(let attempt=0;attempt<8;attempt++) {
+    const [existing] = await db.select().from(studySessions).where(eq(studySessions.id, sessionId)).limit(1);
     if (!existing) return NextResponse.json({ error: 'Session not found' }, { status: 404 });
     // Completion is terminal: older in-flight autosaves cannot downgrade it.
     if (existing.status === 'completed' && body.sessionStatus !== 'completed') {
       return NextResponse.json({ ok: true, savedAt: now, ignored: 'completed-session' });
     }
-    await db.update(studySessions).set({
+    const stored=JSON.parse(existing.stateJson||'{}');
+    if(Number(stored.explorationRevision||0)>Number(body.state?.explorationRevision||0)) {
+      body.state={...body.state,designIndex:stored.designIndex,previousDesignIndex:stored.previousDesignIndex,visitedDesigns:stored.visitedDesigns,explorationRevision:stored.explorationRevision};
+      body.state.responseFrom=latentSnapshot(body.state);
+      body.state.responseTarget=body.state.responsePhase==='queued'?responseTarget(body.state,body.state.response):latentSnapshot(body.state);
+    }
+    const updated=await db.update(studySessions).set({
       status: String(body.sessionStatus || 'active'),
       currentTrial: Number(body.currentTrial || 0),
       stateJson: JSON.stringify(body.state || {}),
       elapsedMs: Number(body.elapsedMs || 0),
       completedAt: body.sessionStatus === 'completed' ? now : null,
       updatedAt: now,
-    }).where(eq(studySessions.id, sessionId));
+    }).where(and(eq(studySessions.id, sessionId),eq(studySessions.stateJson,existing.stateJson))).returning({id:studySessions.id});
+    if(updated.length){saved=true;break}
+    }
+    if(!saved)return NextResponse.json({error:'Concurrent update; retry save'},{status:409});
 
     if (body.trial) {
       const trial = body.trial;
@@ -112,7 +143,7 @@ export async function POST(request: NextRequest) {
         },
       });
     }
-    return NextResponse.json({ ok: true, savedAt: now });
+    return NextResponse.json({ ok: true, savedAt: now, state:body.state });
   }
 
   if (body.action === 'animation-ack') {

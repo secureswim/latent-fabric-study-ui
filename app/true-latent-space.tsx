@@ -2,6 +2,7 @@
 
 import { useEffect, useState, useRef } from 'react';
 import { designId, LatentSnapshot, StudyState } from './study';
+import { decodePosition, encodePosition } from './latent-position';
 
 type MapPoint=[number,number,number];
 type Exemplar={designIndex:number;sourceIndex:number;position:[number,number];points:number[]};
@@ -65,20 +66,29 @@ function marker(ctx:CanvasRenderingContext2D,p:XY,color:string,size=6,label=''){
   if(label){ctx.fillStyle=color;ctx.font='9px ui-monospace, monospace';ctx.fillText(label,p.x+size+5,p.y+3)}ctx.restore();
 }
 
-export function CandidateField({state}:{state:StudyState}){
+export function CandidateField({state,onExplore}:{state:StudyState;onExplore?:(index:number)=>void}){
   const canvas=useRef<HTMLCanvasElement>(null),data=useLatentData();
+  const dragging=useRef(false);
+  const interactive=!!onExplore&&state.trialRunning&&state.recording&&!state.overlayVisible&&state.responsePhase==='idle';
+  const pick=(event:React.PointerEvent<HTMLCanvasElement>)=>{
+    if(!interactive)return;
+    const rect=event.currentTarget.getBoundingClientRect();
+    onExplore?.(encodePosition(((event.clientX-rect.left)/rect.width-.06)/.88,1-((event.clientY-rect.top)/rect.height-.06)/.88));
+  };
   useEffect(()=>{
     const element=canvas.current;if(!element||!data)return;
     const ctx=element.getContext('2d');if(!ctx)return;
     let width=1,height=1,dpr=1,frame=0;
     const xs=data.map.map(point=>point[0]),ys=data.map.map(point=>point[1]);
     const bounds={minX:Math.min(...xs),maxX:Math.max(...xs),minY:Math.min(...ys),maxY:Math.max(...ys)};
-    const from=state.responseFrom?.visitedDesigns?state.responseFrom:snap(state);
-    const target=state.responseTarget?.visitedDesigns?state.responseTarget:snap(state);
+    const animating=['queued','running'].includes(state.responsePhase);
+    const from=animating?state.responseFrom:snap(state);
+    const target=animating?state.responseTarget:snap(state);
     const exemplar=(index:number)=>data.exemplars[((index%data.exemplars.length)+data.exemplars.length)%data.exemplars.length];
     const running=state.responsePhase==='running'&&state.screen==='responding';
+    const worldPosition=(index:number):[number,number]=>{const p=decodePosition(index);return p?[mix(bounds.minX,bounds.maxX,p[0]),mix(bounds.minY,bounds.maxY,p[1])]:exemplar(index).position};
     const position=(index:number,scale=1,focus?:[number,number]):XY=>{
-      const [x,y]=exemplar(index).position;
+      const [x,y]=worldPosition(index);
       const nx=(x-bounds.minX)/(bounds.maxX-bounds.minX),ny=(y-bounds.minY)/(bounds.maxY-bounds.minY);
       let px=.06*width+nx*.88*width,py=.06*height+(1-ny)*.88*height;
       if(focus){const fx=.06*width+((focus[0]-bounds.minX)/(bounds.maxX-bounds.minX))*.88*width;const fy=.06*height+(1-(focus[1]-bounds.minY)/(bounds.maxY-bounds.minY))*.88*height;px=fx+(px-fx)*scale;py=fy+(py-fy)*scale}
@@ -86,7 +96,7 @@ export function CandidateField({state}:{state:StudyState}){
     };
     const paint=()=>{
       const raw=running?animationProgress(state):1,recognition=smooth(raw/.15),motion=smooth((raw-.15)/.68),settle=smooth((raw-.83)/.17);
-      const focus=exemplar(from.designIndex).position;
+      const focus=worldPosition(from.designIndex);
       let viewScale=1;
       if(running&&(state.response==='broad'||state.response==='zoom-out'))viewScale=mix(1,.72,motion);
       if(running&&state.response==='local')viewScale=mix(1,1.75,motion);
@@ -109,7 +119,7 @@ export function CandidateField({state}:{state:StudyState}){
       const history=from.visitedDesigns?.length?from.visitedDesigns:[from.designIndex];
       for(let i=1;i<history.length;i++)path(ctx,pointFor(history[i-1]),pointFor(history[i]),1,'rgba(255,159,69,.28)');
       const start=pointFor(from.designIndex),end=pointFor(target.designIndex);
-      const travelling=['navigate','return-anchor','branch','undo','reset','timeline-branch'].includes(state.response);
+      const travelling=['navigate','broad','local','return-anchor','branch','undo','reset','timeline-branch'].includes(state.response);
       const current=running&&travelling?curve(start,end,motion,state.response==='timeline-branch'?42:28):end;
       for(let i=0;i<from.anchors.length;i++)marker(ctx,pointFor(from.anchors[i]),'#69b9e3',5,`A${i+1}`);
       if(running){
@@ -131,29 +141,39 @@ export function CandidateField({state}:{state:StudyState}){
     const resize=()=>{const rect=element.getBoundingClientRect();width=Math.max(1,rect.width);height=Math.max(1,rect.height);dpr=Math.min(devicePixelRatio||1,2);element.width=Math.round(width*dpr);element.height=Math.round(height*dpr);ctx.setTransform(dpr,0,0,dpr,0,0);paint()};
     const observer=new ResizeObserver(resize);observer.observe(element);resize();return()=>{observer.disconnect();cancelAnimationFrame(frame)};
   },[data,state]);
-  return <canvas ref={canvas} className="candidate-canvas" aria-label="ShapeNet chair and table latent-space embedding"/>;
+  return <canvas ref={canvas} className="candidate-canvas" style={{touchAction:'none',cursor:interactive?'crosshair':'default'}} aria-label="ShapeNet latent space: click or drag to explore during an active trial" onPointerDown={e=>{if(!interactive||e.button!==0)return;dragging.current=true;e.currentTarget.setPointerCapture(e.pointerId);pick(e)}} onPointerMove={e=>{if(dragging.current)pick(e)}} onPointerUp={e=>{if(dragging.current)pick(e);dragging.current=false}} onPointerCancel={()=>{dragging.current=false}} onLostPointerCapture={()=>{dragging.current=false}}/>;
 }
 
-export function PointCloudPreview({state,small=false}:{state:StudyState;small?:boolean}){
+export function PointCloudPreview({state,small=false,view='front'}:{state:StudyState;small?:boolean;view?:'front'|'side'|'top'}){
   const canvas=useRef<HTMLCanvasElement>(null),data=useLatentData();
   useEffect(()=>{
     const element=canvas.current;if(!element||!data)return;const ctx=element.getContext('2d');if(!ctx)return;
     let width=1,height=1,dpr=1,frame=0,startTime=performance.now();
-    const exemplar=(index:number)=>data.exemplars[((index%data.exemplars.length)+data.exemplars.length)%data.exemplars.length];
+    const xs=data.map.map(p=>p[0]),ys=data.map.map(p=>p[1]);
+    const minX=Math.min(...xs),maxX=Math.max(...xs),minY=Math.min(...ys),maxY=Math.max(...ys);
+    const exemplar=(index:number)=>{
+      const p=decodePosition(index);
+      if(!p)return data.exemplars[((index%data.exemplars.length)+data.exemplars.length)%data.exemplars.length];
+      const x=mix(minX,maxX,p[0]),y=mix(minY,maxY,p[1]);
+      const nearest=data.exemplars.map(e=>({e,d:(e.position[0]-x)**2+(e.position[1]-y)**2})).sort((a,b)=>a.d-b.d).slice(0,4);
+      const weights=nearest.map(n=>1/Math.max(n.d,1e-8)),sum=weights.reduce((a,b)=>a+b,0);
+      const points=nearest[0].e.points.map((_,i)=>nearest.reduce((v,n,j)=>v+n.e.points[i]*weights[j]/sum,0));
+      return {...nearest[0].e,points,sourceIndex:-1};
+    };
     const from=exemplar(state.responsePhase==='running'?state.responseFrom.designIndex:state.designIndex),to=exemplar(state.responsePhase==='running'?state.responseTarget.designIndex:state.designIndex);
     const paint=(now=performance.now())=>{
-      const progress=state.responsePhase==='running'?animationProgress(state):1,angle=small?-.55:-.65+Math.sin((now-startTime)/6000)*.18;
+      const progress=state.responsePhase==='running'?animationProgress(state):1,angle=small?(view==='side'?Math.PI/2:0):-.65+Math.sin((now-startTime)/6000)*.18;
       const cos=Math.cos(angle),sin=Math.sin(angle),projected:Array<[number,number,number,number]>=[];
       let maxExtent=.001;
       for(let i=0;i<from.points.length;i+=3){const x=mix(from.points[i],to.points[i],progress),y=mix(from.points[i+1],to.points[i+1],progress),z=mix(from.points[i+2],to.points[i+2],progress);maxExtent=Math.max(maxExtent,Math.abs(x),Math.abs(y),Math.abs(z));const rx=x*cos-z*sin,depth=x*sin+z*cos;projected.push([rx,y,depth,z])}
       projected.sort((a,b)=>a[2]-b[2]);const scale=(small?.38:.4)*Math.min(width,height)/maxExtent;
       ctx.clearRect(0,0,width,height);ctx.fillStyle=small?'#14171a':'#15191d';ctx.fillRect(0,0,width,height);
-      for(const [x,y,depth,z] of projected){const shade=clamp(.45+(z/maxExtent)*.35,.12,.92);ctx.fillStyle=`hsla(${mix(236,35,shade)},78%,${mix(48,69,shade)}%,.82)`;const radius=small?.75:1.25+clamp(depth/maxExtent,-1,1)*.25;ctx.beginPath();ctx.arc(width/2+x*scale,height*.52-y*scale+depth*scale*.12,radius,0,Math.PI*2);ctx.fill()}
-      if(!small){ctx.fillStyle='rgba(215,220,225,.64)';ctx.font='8px ui-monospace, monospace';ctx.fillText(`SHAPENET #${to.sourceIndex} · 1 024 POINTS`,10,height-10)}
+      for(const [x,y,depth,z] of projected){const shade=clamp(.45+(z/maxExtent)*.35,.12,.92);ctx.fillStyle=`hsla(${mix(236,35,shade)},78%,${mix(48,69,shade)}%,.82)`;const radius=small?.75:1.25+clamp(depth/maxExtent,-1,1)*.25;ctx.beginPath();ctx.arc(width/2+x*scale,height*.52-(small&&view==='top'?z:y)*scale+(small?0:depth*scale*.12),radius,0,Math.PI*2);ctx.fill()}
+      if(!small){ctx.fillStyle='rgba(215,220,225,.64)';ctx.font='8px ui-monospace, monospace';ctx.fillText(to.sourceIndex<0?'INTERPOLATED SHAPE · 1 024 POINTS':`SHAPENET #${to.sourceIndex} · 1 024 POINTS`,10,height-10)}
       frame=requestAnimationFrame(paint);
     };
     const resize=()=>{const rect=element.getBoundingClientRect();width=Math.max(1,rect.width);height=Math.max(1,rect.height);dpr=Math.min(devicePixelRatio||1,2);element.width=Math.round(width*dpr);element.height=Math.round(height*dpr);ctx.setTransform(dpr,0,0,dpr,0,0)};
     const observer=new ResizeObserver(resize);observer.observe(element);resize();frame=requestAnimationFrame(paint);return()=>{observer.disconnect();cancelAnimationFrame(frame)};
-  },[data,state.animationId,state.responsePhase,state.responseStartedAt,state.designIndex,state.responseFrom,state.responseTarget,small]);
+  },[data,state.animationId,state.responsePhase,state.responseStartedAt,state.designIndex,state.responseFrom,state.responseTarget,small,view]);
   return <canvas ref={canvas} className={small?'point-preview small':'point-preview'} aria-label="Decoded ShapeNet point-cloud preview"/>;
 }
