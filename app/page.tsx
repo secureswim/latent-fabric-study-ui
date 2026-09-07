@@ -2,7 +2,7 @@
 
 import { CSSProperties, useEffect, useMemo, useRef, useState } from 'react';
 import { CHANNEL_NAME, currentReferent, DEFAULT_STATE, designId, STORAGE_KEY, StudyState } from './study';
-import { activeDesignLabel, animationProgress, CandidateField, RESPONSE_LABELS } from './latent-field';
+import { activeDesignLabel, CandidateField, PointCloudPreview, RESPONSE_LABELS } from './true-latent-space';
 
 type Pt = { x: number; y: number; a: number; s: number };
 
@@ -134,21 +134,7 @@ function ChairModel({ state, small = false }: { state: StudyState; small?: boole
 }
 
 function PreviewMorph({state}:{state:StudyState}){
-  const [progress,setProgress]=useState(()=>animationProgress(state));
-  useEffect(()=>{
-    let frame=0;
-    const tick=()=>{const next=animationProgress(state);setProgress(next);if(state.responsePhase==='running'&&next<1)frame=requestAnimationFrame(tick)};
-    tick();return()=>cancelAnimationFrame(frame);
-  },[state.animationId,state.responsePhase,state.responseStartedAt,state.responseDurationMs]);
-  if(state.responsePhase!=='running')return <ChairModel state={state}/>;
-  const from={...state,...state.responseFrom};
-  const target={...state,...state.responseTarget};
-  const locked=state.response==='lock'?progress:state.response==='unlock'?1-progress:0;
-  return <div className="chair-morph" style={{'--morph-progress':progress,'--lock-progress':locked} as CSSProperties}>
-    <div className="chair-morph-layer from"><ChairModel state={from}/></div>
-    <div className="chair-morph-layer target"><ChairModel state={target}/></div>
-    {(state.response==='lock'||state.response==='unlock')&&<div className="preview-lock-brackets"><i/><i/><b>{state.response==='lock'?'CONSTRAINT APPLIED':'CONSTRAINT RELEASED'}</b></div>}
-  </div>;
+  return <PointCloudPreview state={state}/>;
 }
 
 function TaskOverlay({ state }: { state: StudyState }) {
@@ -186,7 +172,8 @@ export default function Home() {
     const signature = (value: StudyState) => [
       value.sessionId, value.sessionStatus, value.setupComplete, value.currentTrial,
       value.screen, value.response, value.overlayVisible, value.trialRunning,
-      value.animationId, value.responsePhase,
+      value.animationId, value.responsePhase, value.designIndex, value.branch,
+      value.anchors.join(','), value.locked.join(','), value.visitedDesigns.join(','),
     ].join('|');
     const acceptLocalState = (next: StudyState) => {
       const normalized={...DEFAULT_STATE,...next} as StudyState;
@@ -210,6 +197,7 @@ export default function Home() {
           if(current.animationId&&current.animationId===hosted.animationId&&current.responsePhase==='running'&&hosted.responsePhase==='queued')return;
           const pending = pendingLocalState.current;
           if (pending && signature(hosted) !== pending) return;
+          if(signature(hosted)===signature(current))return;
           pendingLocalState.current = null;
           applyState(hosted);
         }
@@ -258,11 +246,11 @@ export default function Home() {
   const displayId=activeDesignLabel(state);
   const dims = [820 + state.designIndex*9%260, 730 + state.designIndex*7%210, 960 + state.designIndex*13%280, 390 + state.designIndex*3%80];
   return <main className={`instrument ${state.overlayVisible ? 'overlay-active' : ''}`}>
-    <header className="instrument-header"><b>LATENT FABRIC</b><span>STATE <strong>{state.responsePhase==='queued'?'QUEUED':state.responsePhase==='running'?'TRANSFORMING':state.response.toUpperCase()}</strong></span><span>DESIGN <strong>{displayId}</strong></span><span>BRANCH <strong>{state.branch}</strong></span><span>LOCKED <strong>{state.locked.length} / 5</strong></span><span className="header-domain">CHAIR · 2 049 CANDIDATES</span></header>
+    <header className="instrument-header"><b>LATENT FABRIC</b><span>STATE <strong>{state.responsePhase==='queued'?'QUEUED':state.responsePhase==='running'?'TRANSFORMING':state.response.toUpperCase()}</strong></span><span>DESIGN <strong>{displayId}</strong></span><span>BRANCH <strong>{state.branch}</strong></span><span>LOCKED <strong>{state.locked.length} / 5</strong></span><span className="header-domain">SHAPENET · 15 287 OBJECTS</span></header>
     <section className="instrument-body">
       <aside className="browser-panel">
         <div className="panel-title">BROWSER <span>⌄</span></div>
-        <div className="browser-tree"><b>▾ Chair · exploration</b><span>Current point <code>{id}</code></span><b>▾ Anchors {state.anchors.length}</b>{state.anchors.length ? state.anchors.map((_,i)=><span key={i}>A{i+1} · preserved state</span>) : <span>none yet</span>}<b>▾ Branches {state.branch==='b0'?1:2}</b><span>b0 · trunk</span>{state.branch!=='b0'&&<span>{state.branch} · active</span>}<b>▾ Locked components {state.locked.length}</b><span>{state.locked.length ? state.locked.join(', ') : 'none'}</span></div>
+        <div className="browser-tree"><b>▾ ShapeNet · learned manifold</b><span>Current vector <code>{id}</code></span><b>▾ Anchors {state.anchors.length}</b>{state.anchors.length ? state.anchors.map((_,i)=><span key={i}>A{i+1} · preserved vector</span>) : <span>none yet</span>}<b>▾ Branches {state.branch==='b0'?1:2}</b><span>b0 · trunk</span>{state.branch!=='b0'&&<span>{state.branch} · active</span>}<b>▾ Locked components {state.locked.length}</b><span>{state.locked.length ? state.locked.join(', ') : 'none'}</span></div>
         <div className="anchor-heading"><span>ANCHORS</span><b>{state.anchors.length}</b></div>
         <div className="anchor-dock">{state.anchors.length ? state.anchors.slice(-4).map((a,i)=><div className="anchor-tile" key={i}><strong>A{i+1}</strong><small>{designId(a)}</small></div>) : <div className="dock-empty">EMPTY</div>}</div>
         <div className="browser-stats"><span>STEPS {String(state.currentTrial+2).padStart(2,'0')}</span><span>BRANCHES {state.branch==='b0'?1:2}</span></div>
@@ -278,14 +266,14 @@ export default function Home() {
       <aside className="preview-panel">
         <div className="panel-title">PREVIEW · {displayId.toUpperCase()} <span>ISO · FRONT · SIDE · TOP</span></div>
         <PreviewMorph state={state}/>
-        <div className="ortho-row"><ChairModel state={state} small/><ChairModel state={{...state,designIndex:state.designIndex+1}} small/><ChairModel state={{...state,designIndex:state.designIndex+2}} small/></div>
+        <div className="ortho-row"><PointCloudPreview state={state} small/><PointCloudPreview state={{...state,designIndex:(state.designIndex+1)%28}} small/><PointCloudPreview state={{...state,designIndex:(state.designIndex+2)%28}} small/></div>
         <div className="dimension-grid">{['W','D','H','SEAT'].map((d,i)=><div key={d}><span>{d}</span><strong>{dims[i]} <i>mm</i></strong></div>)}</div>
         <div className="lock-title">COMPONENT LOCKS <b>{state.locked.length} / 5</b></div>
         {['Headrest','Backrest','Seat','Armrests','Legs / base'].map(p=><div className={`lock-row ${state.locked.includes(p)?'is-locked':''}`} key={p}><span>{p}</span><b>{state.locked.includes(p)?'LOCKED':'FREE'}</b></div>)}
       </aside>
     </section>
     <section className="timeline"><div className="timeline-tabs"><b>TIMELINE</b><span>BRANCHES</span><small>SHOWING STEP SEQUENCE</small></div><div className="timeline-track"><i className="start-node"/><span>START</span>{Array.from({length:Math.min(8,state.currentTrial+3)},(_,i)=><i className={i===Math.min(7,state.currentTrial+2)?'current-node':''} key={i}/>)}<span className="step-label">CURRENT · STEP {String(state.currentTrial+2).padStart(2,'0')}</span></div></section>
-    <footer className="instrument-status"><b>{state.recording?'● RECORDING':'PAUSED'}</b><span>DESIGN {id}</span><span>BRANCH {state.branch}</span><span>LOCKED {state.locked.length} / 5</span><span>mm · 1200 × 600 ACTIVE</span></footer>
+    <footer className="instrument-status"><b>{state.recording?'● RECORDING':'PAUSED'}</b><span>DESIGN {id}</span><span>BRANCH {state.branch}</span><span>LOCKED {state.locked.length} / 5</span><span>UMAP · 128-D LATENT SPACE</span></footer>
     <TaskOverlay state={state}/>
   </main>;
 }

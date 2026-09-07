@@ -131,7 +131,7 @@ export default function ResearcherPage(){
 
   const startTrial=()=>{
     if(stateRef.current.trialRunning||logRef.current.status==='completed'||logRef.current.status==='response-triggered')return;
-    const at=Date.now();const startedLog={...logRef.current,status:'running',trialStartedAt:logRef.current.trialStartedAt||at};storeDraft(startedLog);
+    const at=Date.now();const startedLog={...logRef.current,status:'running',trialStartedAt:logRef.current.trialStartedAt||at};storeDraft(startedLog,stateRef.current.currentTrial,false);
     const s=stateRef.current;const snapshot:LatentSnapshot={designIndex:s.designIndex,branch:s.branch,anchors:[...s.anchors],locked:[...s.locked],visitedDesigns:[...(s.visitedDesigns||[s.designIndex])]};
     const started={...s,screen:'trial' as const,response:'idle' as const,animationId:'',responsePhase:'idle' as const,responseStartedAt:0,responseCompletedAt:0,responseFrom:snapshot,responseTarget:snapshot,overlayVisible:false,trialRunning:true,trialStartedAt:at,trialAccumulatedMs:Number(startedLog.trialDurationMs||0)};publishState(started);persistSnapshot('draft',startedLog,started);
   };
@@ -161,8 +161,8 @@ export default function ResearcherPage(){
   const pauseResume=()=>{
     const at=Date.now();const s=stateRef.current;
     if(s.sessionStatus==='completed')return;
-    if(s.recording){const duration=trialElapsed(s,logRef.current,at);const draft={...logRef.current,trialDurationMs:duration,status:s.trialRunning?'paused':logRef.current.status};storeDraft(draft);const paused={...s,sessionStatus:'paused' as const,recording:false,sessionAccumulatedMs:sessionElapsed(s,at),sessionRunStartedAt:0,trialRunning:false,trialStartedAt:0};publishState(paused);persistSnapshot('draft',draft,paused)}
-    else{const resumed={...s,sessionStatus:'active' as const,recording:true,sessionRunStartedAt:at,trialRunning:logRef.current.status==='paused',trialStartedAt:logRef.current.status==='paused'?at:0};publishState(resumed);storeDraft({...logRef.current,status:logRef.current.status==='paused'?'running':logRef.current.status})}
+    if(s.recording){const duration=trialElapsed(s,logRef.current,at);const draft={...logRef.current,trialDurationMs:duration,status:s.trialRunning?'paused':logRef.current.status};storeDraft(draft,s.currentTrial,false);const paused={...s,sessionStatus:'paused' as const,recording:false,sessionAccumulatedMs:sessionElapsed(s,at),sessionRunStartedAt:0,trialRunning:false,trialStartedAt:0};publishState(paused);persistSnapshot('draft',draft,paused)}
+    else{const resumedLog={...logRef.current,status:logRef.current.status==='paused'?'running':logRef.current.status};const resumed={...s,sessionStatus:'active' as const,recording:true,sessionRunStartedAt:at,trialRunning:logRef.current.status==='paused',trialStartedAt:logRef.current.status==='paused'?at:0};publishState(resumed);storeDraft(resumedLog,s.currentTrial,false);persistSnapshot('draft',resumedLog,resumed)}
   };
 
   const saveNext=async()=>{
