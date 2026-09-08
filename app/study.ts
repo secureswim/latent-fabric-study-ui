@@ -1,5 +1,3 @@
-import { movePosition } from './latent-position';
-
 export type ScreenMode =
   | 'welcome' | 'familiarization' | 'practice' | 'trial' | 'captured'
   | 'responding' | 'response-complete' | 'question-why' | 'question-expect'
@@ -18,6 +16,9 @@ export type Referent = {
 };
 
 export type LatentSnapshot = {
+  viewScale?: number;
+  branchHeads?: Record<string,number>;
+  lockedDesignIndex?: number;
   designIndex: number;
   branch: string;
   anchors: number[];
@@ -52,6 +53,9 @@ export const SEQUENCES: Record<string, number[]> = {
 };
 
 export type StudyState = {
+  viewScale?: number;
+  branchHeads?: Record<string,number>;
+  lockedDesignIndex?: number;
   explorationRevision?: number;
   sessionId: string;
   sessionStatus: 'active' | 'paused' | 'completed';
@@ -137,7 +141,7 @@ export function designId(index: number) {
 }
 
 export function latentSnapshot(s: StudyState): LatentSnapshot {
-  return {designIndex:s.designIndex,branch:s.branch,anchors:[...s.anchors],locked:[...s.locked],visitedDesigns:[...(s.visitedDesigns||[s.designIndex])]};
+  return {designIndex:s.designIndex,branch:s.branch,anchors:[...s.anchors],locked:[...s.locked],visitedDesigns:[...(s.visitedDesigns||[s.designIndex])],viewScale:s.viewScale||1,branchHeads:{...(s.branchHeads||{}),[s.branch]:s.designIndex},lockedDesignIndex:s.lockedDesignIndex};
 }
 
 export function responseTarget(s: StudyState, response: ResponseKind): LatentSnapshot {
@@ -145,14 +149,29 @@ export function responseTarget(s: StudyState, response: ResponseKind): LatentSna
   const id = s.designIndex;
   if (response === 'anchor' && !target.anchors.includes(id)) target.anchors.push(id);
   if (response === 'return-anchor' && target.anchors.length) target.designIndex = target.anchors.at(-1)!;
-  if (response === 'lock' && !target.locked.includes('Backrest')) target.locked.push('Backrest');
-  if (response === 'unlock') target.locked = [];
-  if (response === 'branch') { target.branch = `b${Number(s.branch.slice(1)||0)+1}`; target.designIndex = movePosition(id,.06,.05,3); }
-  if (response === 'reset') target.designIndex = 8;
-  if (response === 'undo') target.designIndex = target.visitedDesigns.at(-2) ?? s.previousDesignIndex ?? 8;
-  if (response === 'timeline-branch') { target.designIndex = movePosition(id,-.12,.09,5); target.branch = s.branch === 'b0' ? 'b1' : 'b0'; }
-  const moves: Partial<Record<ResponseKind,[number,number,number]>> = {navigate:[.07,.02,2],broad:[-.2,.18,9],local:[.012,.008,1]};
-  const move=moves[response]; if(move) target.designIndex=movePosition(id,...move);
-  if(target.designIndex!==id) target.visitedDesigns.push(target.designIndex);
+  if (response === 'lock' && !target.locked.includes('Backrest')) {target.locked.push('Backrest');target.lockedDesignIndex=id;}
+  if (response === 'unlock') {target.locked=[];target.lockedDesignIndex=undefined;}
+  if (response === 'branch' && target.anchors.length) {
+    target.branch=`b${Math.max(0,...Object.keys(target.branchHeads!).map(key=>Number(key.slice(1))||0))+1}`;
+    target.designIndex=target.anchors.at(-1)!;
+  }
+  if (response === 'reset') {target.designIndex=8;target.branch='b0';target.anchors=[];target.locked=[];target.lockedDesignIndex=undefined;target.viewScale=1;target.branchHeads={b0:8};target.visitedDesigns=[8];}
+  if (response === 'undo' && target.visitedDesigns.length>1) {target.visitedDesigns.pop();target.designIndex=target.visitedDesigns.at(-1)!;}
+  if (response === 'timeline-branch') {const other=Object.keys(target.branchHeads!).filter(key=>key!==s.branch).at(-1);if(other){target.branch=other;target.designIndex=target.branchHeads![other];}}
+  if (response === 'broad' || response === 'zoom-out') target.viewScale=Math.max(.65,(s.viewScale||1)*.65);
+  if (response === 'local') target.viewScale=Math.min(3,(s.viewScale||1)*1.5);
+  // Navigation confirms the location chosen by the participant; it never adds
+  // an arbitrary displacement after they finish moving.
+  if(target.designIndex!==id&&target.visitedDesigns.at(-1)!==target.designIndex) target.visitedDesigns.push(target.designIndex);
+  target.branchHeads![target.branch]=target.designIndex;
   return target;
+}
+
+export function responseRequirement(s:StudyState):string {
+  const id=currentReferent(s).id;
+  if(['return-anchor','branch'].includes(id)&&!s.anchors.length)return 'Save an anchor in the Anchor trial first.';
+  if(id==='compare'&&s.anchors.length<2)return 'Two saved anchors are needed for comparison.';
+  if(id==='switch-branch'&&Object.keys(s.branchHeads||{}).filter(key=>key!==s.branch).length===0)return 'Create another branch before switching paths.';
+  if(id==='undo'&&(s.visitedDesigns||[]).length<2)return 'Explore to another position before undoing a move.';
+  return '';
 }

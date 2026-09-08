@@ -25,5 +25,12 @@ assert.equal(done.state.anchors[0],index);
 const reload=await (await fetch(`${base}/api/sessions?id=${state.sessionId}`)).json();
 assert.equal(JSON.parse(reload.session.stateJson).designIndex,index,'position survives reload');
 // Leave this local-only QA session ready for browser pointer checks.
-await save({...done.state,trialRunning:true,trialStartedAt:Date.now(),response:'idle',responsePhase:'idle',animationId:'',screen:'trial'});
+const ready={...done.state,trialRunning:true,trialStartedAt:Date.now(),response:'idle',responsePhase:'idle',animationId:'',screen:'trial',viewScale:1.5};
+await save(ready);
+const drag={action:'explore',sessionId:state.sessionId,currentTrial:4,trialStartedAt:ready.trialStartedAt,gestureId:crypto.randomUUID()};
+const first=await post({...drag,designIndex:index+100});
+const last=await post({...drag,designIndex:index+200});
+assert.equal(first.state.visitedDesigns.length,last.state.visitedDesigns.length,'one drag is one undoable move');
+assert.equal(last.state.viewScale,1.5,'drag preserves the viewport');
+assert.equal(last.state.branchHeads[last.state.branch],index+200,'branch head follows exploration');
 console.log('PASS: exploration, stale autosave, anchor-at-cursor, late-drag rejection, validation, reload');

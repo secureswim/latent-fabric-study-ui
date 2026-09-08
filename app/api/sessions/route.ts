@@ -76,8 +76,10 @@ export async function POST(request: NextRequest) {
       if(session.status!=='active'||!state.trialRunning||!state.recording||state.overlayVisible||state.responsePhase!=='idle'||state.currentTrial!==body.currentTrial||state.trialStartedAt!==body.trialStartedAt)
         return NextResponse.json({error:'Trial is no longer open for exploration',state},{status:409});
       const history=[...(state.visitedDesigns||[state.designIndex])];
-      if(history.at(-1)!==body.designIndex)history.push(body.designIndex);
-      const next={...state,previousDesignIndex:state.designIndex,designIndex:body.designIndex,visitedDesigns:history,explorationRevision:Number(state.explorationRevision||0)+1};
+      const sameGesture=typeof body.gestureId==='string'&&state.explorationGestureId===body.gestureId;
+      if(sameGesture&&history.length>1)history[history.length-1]=body.designIndex;
+      else if(history.at(-1)!==body.designIndex)history.push(body.designIndex);
+      const next={...state,previousDesignIndex:sameGesture?state.previousDesignIndex:state.designIndex,designIndex:body.designIndex,visitedDesigns:history,branchHeads:{...(state.branchHeads||{}),[state.branch]:body.designIndex},explorationGestureId:body.gestureId,explorationRevision:Number(state.explorationRevision||0)+1};
       next.responseFrom=latentSnapshot(next);next.responseTarget=latentSnapshot(next);
       const updated=await db.update(studySessions).set({stateJson:JSON.stringify(next),updatedAt:now}).where(and(eq(studySessions.id,session.id),eq(studySessions.stateJson,session.stateJson))).returning({id:studySessions.id});
       if(updated.length)return NextResponse.json({state:next});
@@ -97,6 +99,8 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ ok: true, savedAt: now, ignored: 'completed-session' });
     }
     const stored=JSON.parse(existing.stateJson||'{}');
+    const phaseRank:Record<string,number>={idle:0,queued:1,running:2,complete:3};
+    if(stored.animationId&&stored.animationId===body.state?.animationId&&phaseRank[stored.responsePhase]>phaseRank[body.state.responsePhase])body.state={...body.state,...stored};
     if(Number(stored.explorationRevision||0)>Number(body.state?.explorationRevision||0)) {
       body.state={...body.state,designIndex:stored.designIndex,previousDesignIndex:stored.previousDesignIndex,visitedDesigns:stored.visitedDesigns,explorationRevision:stored.explorationRevision};
       body.state.responseFrom=latentSnapshot(body.state);
@@ -159,9 +163,13 @@ export async function POST(request: NextRequest) {
     if (state.animationId !== animationId) {
       return NextResponse.json({ error: 'Animation is no longer current' }, { status: 409 });
     }
+    if(state.responsePhase==='complete')return NextResponse.json({ok:true,state,savedAt:now});
     const target = state.responseTarget || {};
     const nextState = phase === 'complete' ? {
       ...state,
+      viewScale:target.viewScale??state.viewScale??1,
+      branchHeads:target.branchHeads??state.branchHeads,
+      lockedDesignIndex:target.lockedDesignIndex,
       designIndex: Number(target.designIndex ?? state.designIndex ?? 8),
       branch: String(target.branch ?? state.branch ?? 'b0'),
       anchors: Array.isArray(target.anchors) ? target.anchors : (state.anchors || []),

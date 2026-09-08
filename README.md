@@ -20,6 +20,12 @@ Keep the participant display on the projector or participant machine. Keep the r
 
 ## Conduct a participant session
 
+During a running trial, click or drag on the participant map. Release to finish a move; Undo returns to the position before that whole drag. Navigation confirms your chosen position. Broad/local exploration changes the viewport scale and keeps that scale until another zoom or reset.
+
+Anchor saves the current position. Return restores the last anchor; Branch starts a new path at that anchor; Switch Branch restores an existing branch head. Compare shows the last two saved references side by side. If a task needs a reference, the researcher console explains what is missing and offers **Save Current Reference** while the trial runs. History shows actual visited positions. Reset clears the current exploration (anchors, branches and locks); it does not delete participant records.
+
+The map uses the supplied embedding. Shape previews blend 56 decoded chair/table examples, rather than running the full neural decoder for every pointer movement. The preservation effect holds the upper geometric region; it is not semantic part segmentation. The preview therefore remains a study simulation.
+
 1. Open `/researcher`.
 2. Enter the Participant ID, assigned sequence A-D, and optional researcher initials.
 3. Click **Begin Participant Study**. The whole-study timer begins.

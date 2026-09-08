@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { CHANNEL_NAME, currentReferent, DEFAULT_STATE, designId, LatentSnapshot, LOG_KEY, REFERENTS, ResponseKind, SEQUENCES, STORAGE_KEY, StudyState } from '../study';
-import { latentSnapshot, responseTarget } from '../study';
+import { latentSnapshot, responseTarget, responseRequirement } from '../study';
 
 type TrialLog = Record<string, string | number | boolean> & {
   trialDurationMs: number;
@@ -104,7 +104,8 @@ export default function ResearcherPage(){
           return;
         }
         if(hosted.animationId!==current.animationId||hosted.responsePhase===current.responsePhase)return;
-        publishState({...current,...hosted});
+        if(stateRef.current.animationId!==current.animationId||stateRef.current.currentTrial!==current.currentTrial)return;
+        publishState({...stateRef.current,...hosted});
       }catch{/* Participant and local BroadcastChannel remain available offline. */}
     },400);
     return()=>{window.clearInterval(clock);window.clearInterval(backup);window.clearInterval(animationPoll);if(remoteTimer.current)window.clearTimeout(remoteTimer.current);channel.current?.close()};
@@ -150,6 +151,7 @@ export default function ResearcherPage(){
   };
 
   const trigger=async()=>{
+    if(responseRequirement(stateRef.current))return;
     const ref=currentReferent(stateRef.current);const response=(ref.id==='explore-broadly'?'broad':ref.id==='refine-locally'?'local':ref.id==='zoom-out'?'zoom-out':ref.id==='anchor'?'anchor':ref.id==='return-anchor'?'return-anchor':ref.id==='branch'?'branch':ref.id==='lock'?'lock':ref.id==='unlock'?'unlock':ref.id==='undo'?'undo':ref.id==='compare'?'compare':ref.id==='reset'?'reset':ref.id==='history'?'history':ref.id==='switch-branch'?'timeline-branch':ref.id==='select'?'select':'navigate') as ResponseKind;
     const s=stateRef.current;if(!s.trialRunning)return;
     const at=Date.now();const duration=trialElapsed(s,logRef.current,at);const triggeredLog={...logRef.current,trialDurationMs:duration,status:'response-triggered'};
@@ -245,7 +247,7 @@ export default function ResearcherPage(){
       <aside className="trial-list simple-trials"><div className="console-title">TRIALS · {Object.values(logs).filter(l=>l.status==='completed').length} / 15 COMPLETE</div>{SEQUENCES[state.sequence].map((ri,i)=><button key={i} className={`${i===state.currentTrial?'active':''} ${logs[String(i)]?.status==='completed'?'done':''}`} onClick={()=>selectTrial(i)}><span>{String(i+1).padStart(2,'0')}</span><b>{REFERENTS[ri].label}</b><small>{logs[String(i)]?.status==='completed'?'✓':logs[String(i)]?.status==='response-triggered'?'CAPTURED':logs[String(i)]?.status==='draft'||logs[String(i)]?.status==='paused'?'DRAFT':REFERENTS[ri].tier}</small></button>)}<div className="storage-card"><span>STUDY STORAGE</span><b>{storageState==='offline'?'Local backup active':'Durable autosave active'}</b><small>{savedAt?`Last saved ${new Date(savedAt).toLocaleTimeString()}`:'Waiting for first change'}</small><button onClick={exportSession}>EXPORT JSON</button>{state.screen==='complete'&&<button className="new-participant" onClick={newParticipant}>NEXT PARTICIPANT</button>}</div></aside>
       <section className="study-controls">
         <div className="referent-card"><div className="referent-meta"><span>TASK {String(state.currentTrial+1).padStart(2,'0')} / 15 · TIER {ref.tier}</span><strong>{ref.label}</strong></div><p>Participant prompt: “{ref.prompt}”</p><div className="task-timing"><span>TRIAL TIME</span><b>{formatDuration(trialTime)}</b><small>{state.trialRunning?'RUNNING':log.status==='completed'?'SAVED':state.responsePhase==='queued'?'WAITING FOR DISPLAY':state.responsePhase==='running'?'ANIMATING':state.responsePhase==='complete'?'RESPONSE COMPLETE':'READY'}</small></div></div>
-        <div className="workflow-card simplified-workflow"><div className="console-title">TRIAL CONTROL</div><button className="start-trial" disabled={state.trialRunning||log.status==='completed'||log.status==='response-triggered'} onClick={startTrial}>{log.status==='completed'?'TRIAL SAVED':log.status==='response-triggered'?'RESPONSE CAPTURED':state.trialRunning?'TRIAL IN PROGRESS':'START TRIAL'}</button><button className="primary-trigger" disabled={!state.trialRunning} onClick={trigger}>TRIGGER RESPONSE</button><p>Starting the trial begins timing. Triggering the response stops and stores the trial time while you complete the observation form.</p></div>
+        <div className="workflow-card simplified-workflow"><div className="console-title">TRIAL CONTROL</div><button className="start-trial" disabled={state.trialRunning||log.status==='completed'||log.status==='response-triggered'} onClick={startTrial}>{log.status==='completed'?'TRIAL SAVED':log.status==='response-triggered'?'RESPONSE CAPTURED':state.trialRunning?'TRIAL IN PROGRESS':'START TRIAL'}</button><button className="primary-trigger" disabled={!state.trialRunning||!!responseRequirement(state)} onClick={trigger}>TRIGGER RESPONSE</button><p>Starting the trial begins timing. Triggering the response stops and stores the trial time while you complete the observation form.</p>{responseRequirement(state)&&<p role="status">{responseRequirement(state)}</p>}{state.trialRunning&&['anchor','compare','return-anchor','branch'].includes(ref.id)&&<button disabled={state.anchors.includes(state.designIndex)} onClick={()=>{const next={...stateRef.current,anchors:[...stateRef.current.anchors,stateRef.current.designIndex]};publishState(next);persistSnapshot('draft',logRef.current,next)}}>SAVE CURRENT REFERENCE</button>}</div>
         <div className="transport"><button disabled={state.responsePhase==='queued'||state.responsePhase==='running'} onClick={()=>selectTrial(Math.max(0,state.currentTrial-1))}>← PREVIOUS</button><button disabled={state.sessionStatus==='completed'} onClick={pauseResume}>{state.sessionStatus==='completed'?'SESSION COMPLETE':state.recording?'PAUSE SESSION':'RESUME SESSION'}</button><button className={state.currentTrial===14?'next finish-study':'next'} disabled={state.sessionStatus==='completed'||state.responsePhase!=='complete'} onClick={saveNext}>{state.sessionStatus==='completed'?'PARTICIPANT COMPLETE':state.responsePhase==='queued'?'WAITING FOR PARTICIPANT DISPLAY…':state.responsePhase==='running'?'PARTICIPANT RESPONSE PLAYING…':state.responsePhase!=='complete'?'TRIGGER RESPONSE TO CONTINUE':state.currentTrial===14?'COMPLETE PARTICIPANT STUDY ✓':'SAVE + NEXT TRIAL →'}</button></div>
       </section>
       <ObservationPanel log={log} updateLog={updateLog}/>

@@ -162,7 +162,10 @@ export default function Home() {
   const acknowledgedStart = useRef('');
   const acknowledgedComplete = useRef('');
   const completionTimer = useRef<number | undefined>(undefined);
-  const explorationQueue=useRef<{index:number;sessionId:string;currentTrial:number;trialStartedAt:number}|null>(null);
+  const explorationQueue=useRef<{index:number;sessionId:string;currentTrial:number;trialStartedAt:number;gestureId:string;sequence:number}|null>(null);
+  const explorationSequence=useRef(0);
+  const explorationGesture=useRef('');
+  const explorationTimer=useRef<ReturnType<typeof setTimeout>|null>(null);
   const explorationBusy=useRef(false);
   const [explorationError,setExplorationError]=useState('');
   const sendExploration=async()=>{
@@ -173,27 +176,29 @@ export default function Home() {
         const move=explorationQueue.current;explorationQueue.current=null;
         const response=await fetch('/api/sessions',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({action:'explore',...move,designIndex:move.index})});
         const payload=await response.json() as {state?:StudyState;error?:string};
-        if(!response.ok){if(payload.state){explorationQueue.current=null;applyState(payload.state)}throw new Error(payload.error||'Position could not be saved')}
+        if(!response.ok){if(payload.state&&stateRef.current.sessionId===move.sessionId&&stateRef.current.trialStartedAt===move.trialStartedAt){explorationQueue.current=null;applyState(payload.state)}throw new Error(payload.error||'Position could not be saved')}
         if(payload.state&&stateRef.current.sessionId===move.sessionId&&stateRef.current.trialStartedAt===move.trialStartedAt&&stateRef.current.responsePhase==='idle'){
-          if(!explorationQueue.current)applyState(payload.state);
+          if(!explorationQueue.current&&move.sequence===explorationSequence.current)applyState(payload.state);
           const channel=new BroadcastChannel(CHANNEL_NAME);channel.postMessage({type:'exploration',state:payload.state});channel.close();
         }
         setExplorationError('');
       }
     }catch{setExplorationError('Position not synchronized — move again to retry before triggering the response.')}finally{explorationBusy.current=false}
   };
-  const explore=(index:number)=>{
-    const s=stateRef.current;if(!s.trialRunning||!s.recording||s.overlayVisible||s.responsePhase!=='idle'||index===s.designIndex)return;
+  const explore=(index:number,finished=false)=>{
+    const s=stateRef.current;if(!s.trialRunning||!s.recording||s.overlayVisible||s.responsePhase!=='idle')return;
+    if(!explorationGesture.current)explorationGesture.current=crypto.randomUUID();
     pendingLocalState.current=null;
-    applyState({...s,designIndex:index});
-    explorationQueue.current={index,sessionId:s.sessionId,currentTrial:s.currentTrial,trialStartedAt:s.trialStartedAt};
-    void sendExploration();
+    applyState({...s,designIndex:index},false);
+    explorationQueue.current={index,sessionId:s.sessionId,currentTrial:s.currentTrial,trialStartedAt:s.trialStartedAt,gestureId:explorationGesture.current,sequence:++explorationSequence.current};
+    if(finished){explorationGesture.current='';if(explorationTimer.current)clearTimeout(explorationTimer.current);explorationTimer.current=null;void sendExploration();}
+    else if(!explorationTimer.current)explorationTimer.current=setTimeout(()=>{explorationTimer.current=null;void sendExploration()},150);
   };
-  const applyState = (next: StudyState) => {
+  const applyState = (next: StudyState,persist=true) => {
     const normalized = {...DEFAULT_STATE,...next} as StudyState;
     stateRef.current = normalized;
     setState(normalized);
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(normalized));
+    if(persist)localStorage.setItem(STORAGE_KEY, JSON.stringify(normalized));
   };
   useEffect(() => {
     const signature = (value: StudyState) => [
@@ -201,10 +206,12 @@ export default function Home() {
       value.screen, value.response, value.overlayVisible, value.trialRunning,
       value.animationId, value.responsePhase, value.designIndex, value.branch,
       value.anchors.join(','), value.locked.join(','), value.visitedDesigns.join(','),
+      value.viewScale,value.lockedDesignIndex,JSON.stringify(value.branchHeads),
     ].join('|');
     const acceptLocalState = (next: StudyState) => {
       const normalized={...DEFAULT_STATE,...next} as StudyState;
       const current=stateRef.current;
+      if(current.animationId&&current.animationId===normalized.animationId&&current.responsePhase==='complete'&&normalized.responsePhase!=='complete')return;
       if(current.animationId&&current.animationId===normalized.animationId&&current.responsePhase==='running'&&normalized.responsePhase==='queued')return;
       pendingLocalState.current = signature(normalized);
       applyState(normalized);
@@ -221,6 +228,8 @@ export default function Home() {
         if (payload.session?.stateJson) {
           const hosted = JSON.parse(payload.session.stateJson) as StudyState;
           const current=stateRef.current;
+          if(current.animationId&&current.animationId===hosted.animationId&&current.responsePhase==='complete'&&hosted.responsePhase!=='complete')return;
+          if(hosted.sessionId===current.sessionId&&Number(hosted.explorationRevision||0)<Number(current.explorationRevision||0))return;
           if((explorationBusy.current||explorationQueue.current)&&hosted.sessionId===current.sessionId&&hosted.currentTrial===current.currentTrial&&hosted.trialRunning&&hosted.responsePhase==='idle')return;
           if(current.animationId&&current.animationId===hosted.animationId&&current.responsePhase==='running'&&hosted.responsePhase==='queued')return;
           const pending = pendingLocalState.current;
@@ -295,14 +304,14 @@ export default function Home() {
       </section>
       <aside className="preview-panel">
         <div className="panel-title">PREVIEW · {displayId.toUpperCase()} <span>ISO · FRONT · SIDE · TOP</span></div>
-        <PreviewMorph state={state}/>
+        {state.response==='compare'&&state.responsePhase==='complete'&&state.anchors.length>=2?<div className="comparison-previews">{state.anchors.slice(-2).map((position,i)=><div key={i}><span>ANCHOR {state.anchors.length-1+i} · {designId(position)}</span><PointCloudPreview state={{...state,designIndex:position,responsePhase:'idle',locked:[]}}/></div>)}</div>:<PreviewMorph state={state}/>}
         <div className="ortho-row"><PointCloudPreview state={state} small view="front"/><PointCloudPreview state={state} small view="side"/><PointCloudPreview state={state} small view="top"/></div>
-        <div className="dimension-grid">{['W','D','H','SEAT'].map((d,i)=><div key={d}><span>{d}</span><strong>{dims[i]} <i>mm</i></strong></div>)}</div>
+        <div className="preview-caption">Decoded exemplars · interpolated preview</div>
         <div className="lock-title">COMPONENT LOCKS <b>{state.locked.length} / 5</b></div>
         {['Headrest','Backrest','Seat','Armrests','Legs / base'].map(p=><div className={`lock-row ${state.locked.includes(p)?'is-locked':''}`} key={p}><span>{p}</span><b>{state.locked.includes(p)?'LOCKED':'FREE'}</b></div>)}
       </aside>
     </section>
-    <section className="timeline"><div className="timeline-tabs"><b>TIMELINE</b><span>BRANCHES</span><small>SHOWING STEP SEQUENCE</small></div><div className="timeline-track"><i className="start-node"/><span>START</span>{Array.from({length:Math.min(8,state.currentTrial+3)},(_,i)=><i className={i===Math.min(7,state.currentTrial+2)?'current-node':''} key={i}/>)}<span className="step-label">CURRENT · STEP {String(state.currentTrial+2).padStart(2,'0')}</span></div></section>
+    <section className="timeline"><div className="timeline-tabs"><b>EXPLORATION HISTORY</b><span>{state.branch}</span><small>{state.visitedDesigns.length} SAVED POSITIONS</small></div><div className="history-positions">{state.visitedDesigns.slice(-24).map((position,i)=><span className={position===state.designIndex?'current-position':''} key={i}>{i===0?'START · ':''}{designId(position)}</span>)}</div></section>
     <footer className="instrument-status"><b>{state.recording?'● RECORDING':'PAUSED'}</b><span>DESIGN {id}</span><span>BRANCH {state.branch}</span><span>LOCKED {state.locked.length} / 5</span><span>UMAP · 128-D LATENT SPACE</span></footer>
     <TaskOverlay state={state}/>
   </main>;

@@ -67,7 +67,8 @@ function decode(latent) {
   return points;
 }
 
-const exemplars = farthestSamples(chairIndices, 28).map((sourceIndex, designIndex) => ({
+// Keep the first 28 chair IDs stable for previously saved sessions.
+const exemplars = [...farthestSamples(chairIndices, 28),...farthestSamples(tableIndices, 28)].map((sourceIndex, designIndex) => ({
   designIndex,
   sourceIndex,
   position: umap[sourceIndex].map(value => +value.toFixed(4)),
