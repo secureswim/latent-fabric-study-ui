@@ -1,3 +1,5 @@
+import { movePosition } from './latent-position';
+
 export type ScreenMode =
   | 'welcome' | 'familiarization' | 'practice' | 'trial' | 'captured'
   | 'responding' | 'response-complete' | 'question-why' | 'question-expect'
@@ -167,11 +169,52 @@ export function responseTarget(s: StudyState, response: ResponseKind): LatentSna
   return target;
 }
 
-export function responseRequirement(s:StudyState):string {
+// Trials are never blocked. When a referent depends on state the participant
+// has not produced yet (an anchor, a second anchor, another branch, an earlier
+// position), the missing piece is synthesised so the response can still play.
+const PLACEHOLDER_STEPS:[number,number][]=[[-.07,.05],[.08,-.04],[-.05,-.08],[.06,.09]];
+
+export function withPrerequisites(s:StudyState):StudyState {
   const id=currentReferent(s).id;
-  if(['return-anchor','branch'].includes(id)&&!s.anchors.length)return 'Save an anchor in the Anchor trial first.';
-  if(id==='compare'&&s.anchors.length<2)return 'Two saved anchors are needed for comparison.';
-  if(id==='switch-branch'&&Object.keys(s.branchHeads||{}).filter(key=>key!==s.branch).length===0)return 'Create another branch before switching paths.';
-  if(id==='undo'&&(s.visitedDesigns||[]).length<2)return 'Explore to another position before undoing a move.';
+  const anchors=[...s.anchors];
+  const locked=[...s.locked];
+  const visitedDesigns=[...(s.visitedDesigns||[s.designIndex])];
+  const branchHeads={...(s.branchHeads||{}),[s.branch]:s.designIndex};
+  // Prefer somewhere the participant actually went; fall back to a nearby point.
+  const earlier=visitedDesigns.filter(position=>position!==s.designIndex);
+  let derived=0;
+  const fresh=(exclude:number[]):number=>{
+    while(earlier.length){const candidate=earlier.pop()!;if(!exclude.includes(candidate))return candidate}
+    for(let attempt=0;attempt<PLACEHOLDER_STEPS.length;attempt++){
+      const [dx,dy]=PLACEHOLDER_STEPS[derived++%PLACEHOLDER_STEPS.length];
+      const candidate=movePosition(s.designIndex,dx,dy,derived);
+      if(!exclude.includes(candidate))return candidate;
+    }
+    return movePosition(s.designIndex,.11,-.11,derived+1);
+  };
+  if(['return-anchor','branch'].includes(id)&&!anchors.length)anchors.push(fresh([s.designIndex]));
+  if(id==='compare')while(anchors.length<2)anchors.push(fresh([...anchors]));
+  if(id==='undo'&&visitedDesigns.length<2)visitedDesigns.unshift(fresh([s.designIndex]));
+  // A history replay of a single point shows nothing; give it a path to trace.
+  if(id==='history')while(visitedDesigns.length<3)visitedDesigns.unshift(fresh(visitedDesigns));
+  // Releasing a constraint that was never applied is invisible; apply one.
+  if(id==='unlock'&&!locked.length)locked.push('Backrest');
+  if(id==='switch-branch'&&Object.keys(branchHeads).filter(key=>key!==s.branch).length===0){
+    const name=`b${Math.max(0,...Object.keys(branchHeads).map(key=>Number(key.slice(1))||0))+1}`;
+    branchHeads[name]=anchors.at(-1)??fresh([s.designIndex]);
+  }
+  const lockedDesignIndex=id==='unlock'&&!s.locked.length?s.designIndex:s.lockedDesignIndex;
+  return {...s,anchors,locked,lockedDesignIndex,visitedDesigns,branchHeads};
+}
+
+// Informational only -- the console shows this, it never disables the trigger.
+export function prerequisiteNote(s:StudyState):string {
+  const id=currentReferent(s).id;
+  if(['return-anchor','branch'].includes(id)&&!s.anchors.length)return 'No anchor saved yet — one will be created for this response.';
+  if(id==='compare'&&s.anchors.length<2)return `Comparison needs two anchors — ${2-s.anchors.length} will be created.`;
+  if(id==='switch-branch'&&Object.keys(s.branchHeads||{}).filter(key=>key!==s.branch).length===0)return 'No second path yet — one will be created to switch to.';
+  if(id==='undo'&&(s.visitedDesigns||[]).length<2)return 'No earlier position yet — one will be created to step back to.';
+  if(id==='history'&&(s.visitedDesigns||[]).length<3)return 'Short history — extra visited positions will be created to replay.';
+  if(id==='unlock'&&!s.locked.length)return 'Nothing locked yet — a lock will be applied so it can be released.';
   return '';
 }

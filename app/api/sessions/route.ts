@@ -2,7 +2,7 @@ import { and, desc, eq } from 'drizzle-orm';
 import { NextRequest, NextResponse } from 'next/server';
 import { ensureSchema, getDb } from '../../../db';
 import { studySessions, studyTrials } from '../../../db/schema';
-import { latentSnapshot, responseTarget } from '../../study';
+import { latentSnapshot, responseTarget, withPrerequisites } from '../../study';
 import { validPositionId } from '../../latent-position';
 
 export const dynamic = 'force-dynamic';
@@ -87,7 +87,9 @@ export async function POST(request: NextRequest) {
       if(sameGesture&&history.length>1)history[history.length-1]=body.designIndex;
       else if(history.at(-1)!==body.designIndex)history.push(body.designIndex);
       const next={...state,previousDesignIndex:sameGesture?state.previousDesignIndex:state.designIndex,designIndex:body.designIndex,visitedDesigns:history,branchHeads:{...(state.branchHeads||{}),[state.branch]:body.designIndex},explorationGestureId:body.gestureId,explorationRevision:Number(state.explorationRevision||0)+1};
-      next.responseFrom=latentSnapshot(next);next.responseTarget=latentSnapshot(next);
+      // A move made while a response is playing must not overwrite that
+      // response's own start and end points, or the animation collapses.
+      if(state.responsePhase==='idle'){next.responseFrom=latentSnapshot(next);next.responseTarget=latentSnapshot(next);}
       const updated=await db.update(studySessions).set({stateJson:JSON.stringify(next),updatedAt:now}).where(and(eq(studySessions.id,session.id),eq(studySessions.stateJson,session.stateJson))).returning({id:studySessions.id});
       if(updated.length)return NextResponse.json({state:next});
     }
@@ -174,7 +176,7 @@ export async function POST(request: NextRequest) {
     // Recompute the outcome from the state as it stands now, so exploration
     // performed while the response was playing is preserved and an anchor
     // records wherever the cursor actually is.
-    const target = responseTarget(state, state.response) as Record<string, any>;
+    const target = responseTarget(withPrerequisites(state), state.response) as Record<string, any>;
     const nextState = phase === 'complete' ? {
       ...state,
       viewScale:target.viewScale??state.viewScale??1,
