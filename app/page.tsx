@@ -147,13 +147,44 @@ function TaskOverlay({ state }: { state: StudyState }) {
   if (state.screen === 'question-expect') return <div className="study-overlay question"><span className="overlay-index">REFLECTION</span><h2>What did you expect the surface to do?</h2></div>;
   if (state.screen === 'rating-naturalness') return <Rating title="How natural did that action feel?" low="Not natural" high="Very natural" />;
   if (state.screen === 'rating-confidence') return <Rating title="How confident are you that this action matched what you wanted the system to do?" low="Not confident" high="Very confident" />;
-  if (state.screen === 'interview') return <div className="study-overlay question"><span className="overlay-index">POST-STUDY INTERVIEW</span><h2>Thank you. The researcher will guide the final conversation.</h2></div>;
-  if (state.screen === 'complete') return <div className="study-overlay welcome-overlay complete"><span className="overlay-index">SESSION COMPLETE</span><h1>THANK YOU</h1><p>Your responses have been recorded.</p></div>;
-  if (['trial','captured'].includes(state.screen)) return <div className="study-overlay task"><span className="overlay-index">TASK {String(state.currentTrial + 1).padStart(2,'0')} / 15</span><h2>{ref.prompt}</h2><p>Use the surface in whatever way feels most natural.</p></div>;
+  const studyFinished = state.sessionStatus === 'completed' || state.currentTrial >= 14;
+  if (state.screen === 'interview' && studyFinished) return <div className="study-overlay question"><span className="overlay-index">POST-STUDY INTERVIEW</span><h2>Thank you. The researcher will guide the final conversation.</h2></div>;
+  if (state.screen === 'complete' && studyFinished) return <div className="study-overlay welcome-overlay complete"><span className="overlay-index">SESSION COMPLETE</span><h1>THANK YOU</h1><p>Your responses have been recorded.</p></div>;
+  if (['trial','captured','interview','complete'].includes(state.screen)) return <div className="study-overlay task"><span className="overlay-index">TASK {String(state.currentTrial + 1).padStart(2,'0')} / 15</span><h2>{ref.prompt}</h2><p>Use the surface in whatever way feels most natural.</p></div>;
   return null;
 }
 
 function Rating({ title, low, high }: { title: string; low: string; high: string }) { return <div className="study-overlay rating"><span className="overlay-index">YOUR EXPERIENCE</span><h2>{title}</h2><div className="rating-scale">{[1,2,3,4,5].map(n=><span key={n}>{n}</span>)}</div><div className="rating-labels"><span>{low}</span><span>{high}</span></div><p>Say the number aloud. The researcher will record it.</p></div>; }
+
+function ExplorationTimeline({ state }: { state: StudyState }) {
+  const visited = state.visitedDesigns?.length ? state.visitedDesigns : [state.designIndex];
+  const shown = visited.slice(-22);
+  const offset = visited.length - shown.length;
+  const found = shown.lastIndexOf(state.designIndex);
+  const currentSlot = found >= 0 ? found : shown.length - 1;
+  const branches = Object.keys(state.branchHeads || { b0: state.designIndex }).length || 1;
+  return <section className="timeline">
+    <div className="timeline-tabs">
+      <b>EXPLORATION TIMELINE</b>
+      <span>BRANCH {state.branch} · {branches} PATH{branches === 1 ? '' : 'S'}</span>
+      <small>STEP {String(visited.length).padStart(2, '0')} · {state.anchors.length} ANCHORED</small>
+    </div>
+    <div className="timeline-track">
+      <div className="track-rail" />
+      {offset > 0 && <div className="track-node track-more"><span className="node-dot">···</span><b>+{offset}</b></div>}
+      {shown.map((position, i) => {
+        const step = offset + i + 1;
+        const anchorIndex = state.anchors.indexOf(position);
+        const isCurrent = i === currentSlot;
+        return <div key={i} className={`track-node${isCurrent ? ' is-current' : ''}${anchorIndex >= 0 ? ' is-anchor' : ''}${step === 1 ? ' is-start' : ''}`}>
+          {anchorIndex >= 0 && <em>A{anchorIndex + 1}</em>}
+          <span className="node-dot"><i /></span>
+          <b>{step === 1 ? 'START' : String(step).padStart(2, '0')}</b>
+        </div>;
+      })}
+    </div>
+  </section>;
+}
 
 export default function Home() {
   const [state, setState] = useState<StudyState>(DEFAULT_STATE);
@@ -290,7 +321,7 @@ export default function Home() {
         <div className="browser-tree"><b>▾ ShapeNet · learned manifold</b><span>Current vector <code>{id}</code></span><b>▾ Anchors {state.anchors.length}</b>{state.anchors.length ? state.anchors.map((_,i)=><span key={i}>A{i+1} · preserved vector</span>) : <span>none yet</span>}<b>▾ Branches {state.branch==='b0'?1:2}</b><span>b0 · trunk</span>{state.branch!=='b0'&&<span>{state.branch} · active</span>}<b>▾ Locked components {state.locked.length}</b><span>{state.locked.length ? state.locked.join(', ') : 'none'}</span></div>
         <div className="anchor-heading"><span>ANCHORS</span><b>{state.anchors.length}</b></div>
         <div className="anchor-dock">{state.anchors.length ? state.anchors.slice(-4).map((a,i)=><div className="anchor-tile" key={i}><strong>A{i+1}</strong><small>{designId(a)}</small></div>) : <div className="dock-empty">EMPTY</div>}</div>
-        <div className="browser-stats"><span>STEPS {String(state.currentTrial+2).padStart(2,'0')}</span><span>BRANCHES {state.branch==='b0'?1:2}</span></div>
+        <div className="browser-stats"><span>STEPS {String((state.visitedDesigns?.length)||1).padStart(2,'0')}</span><span>BRANCHES {Object.keys(state.branchHeads||{b0:0}).length||1}</span></div>
       </aside>
       <section className="map-panel">
         <CandidateField state={state} onExplore={explore}/>
@@ -311,7 +342,7 @@ export default function Home() {
         {['Headrest','Backrest','Seat','Armrests','Legs / base'].map(p=><div className={`lock-row ${state.locked.includes(p)?'is-locked':''}`} key={p}><span>{p}</span><b>{state.locked.includes(p)?'LOCKED':'FREE'}</b></div>)}
       </aside>
     </section>
-    <section className="timeline"><div className="timeline-tabs"><b>EXPLORATION HISTORY</b><span>{state.branch}</span><small>{state.visitedDesigns.length} SAVED POSITIONS</small></div><div className="history-positions">{state.visitedDesigns.slice(-24).map((position,i)=><span className={position===state.designIndex?'current-position':''} key={i}>{i===0?'START · ':''}{designId(position)}</span>)}</div></section>
+    <ExplorationTimeline state={state}/>
     <footer className="instrument-status"><b>{state.recording?'● RECORDING':'PAUSED'}</b><span>DESIGN {id}</span><span>BRANCH {state.branch}</span><span>LOCKED {state.locked.length} / 5</span><span>UMAP · 128-D LATENT SPACE</span></footer>
     <TaskOverlay state={state}/>
   </main>;

@@ -20,6 +20,11 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ session, trials });
   }
   if (live === '1') {
+    // The participant display must follow the session that is actually running.
+    // Ordering by updatedAt alone can surface an older completed session and
+    // leave the projected screen stuck on the end-of-study message.
+    const [active] = await db.select().from(studySessions).where(eq(studySessions.status, 'active')).orderBy(desc(studySessions.updatedAt)).limit(1);
+    if (active) return NextResponse.json({ session: active });
     const [session] = await db.select().from(studySessions).orderBy(desc(studySessions.updatedAt)).limit(1);
     return NextResponse.json({ session: session ?? null });
   }
