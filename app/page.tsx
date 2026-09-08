@@ -207,8 +207,8 @@ export default function Home() {
         const move=explorationQueue.current;explorationQueue.current=null;
         const response=await fetch('/api/sessions',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({action:'explore',...move,designIndex:move.index})});
         const payload=await response.json() as {state?:StudyState;error?:string};
-        if(!response.ok){if(payload.state&&stateRef.current.sessionId===move.sessionId&&stateRef.current.trialStartedAt===move.trialStartedAt){explorationQueue.current=null;applyState(payload.state)}throw new Error(payload.error||'Position could not be saved')}
-        if(payload.state&&stateRef.current.sessionId===move.sessionId&&stateRef.current.trialStartedAt===move.trialStartedAt&&stateRef.current.responsePhase==='idle'){
+        if(!response.ok){if(payload.state&&stateRef.current.sessionId===move.sessionId){explorationQueue.current=null;applyState(payload.state)}throw new Error(payload.error||'Position could not be saved')}
+        if(payload.state&&stateRef.current.sessionId===move.sessionId){
           if(!explorationQueue.current&&move.sequence===explorationSequence.current)applyState(payload.state);
           const channel=new BroadcastChannel(CHANNEL_NAME);channel.postMessage({type:'exploration',state:payload.state});channel.close();
         }
@@ -217,7 +217,7 @@ export default function Home() {
     }catch{setExplorationError('Position not synchronized — move again to retry before triggering the response.')}finally{explorationBusy.current=false}
   };
   const explore=(index:number,finished=false)=>{
-    const s=stateRef.current;if(!s.trialRunning||!s.recording||s.overlayVisible||s.responsePhase!=='idle')return;
+    const s=stateRef.current;if(!s.recording||!s.sessionId)return;
     if(!explorationGesture.current)explorationGesture.current=crypto.randomUUID();
     pendingLocalState.current=null;
     applyState({...s,designIndex:index},false);
@@ -261,7 +261,7 @@ export default function Home() {
           const current=stateRef.current;
           if(current.animationId&&current.animationId===hosted.animationId&&current.responsePhase==='complete'&&hosted.responsePhase!=='complete')return;
           if(hosted.sessionId===current.sessionId&&Number(hosted.explorationRevision||0)<Number(current.explorationRevision||0))return;
-          if((explorationBusy.current||explorationQueue.current)&&hosted.sessionId===current.sessionId&&hosted.currentTrial===current.currentTrial&&hosted.trialRunning&&hosted.responsePhase==='idle')return;
+          if((explorationBusy.current||explorationQueue.current)&&hosted.sessionId===current.sessionId)return;
           if(current.animationId&&current.animationId===hosted.animationId&&current.responsePhase==='running'&&hosted.responsePhase==='queued')return;
           const pending = pendingLocalState.current;
           if (pending && signature(hosted) !== pending) return;
@@ -325,7 +325,7 @@ export default function Home() {
       </aside>
       <section className="map-panel">
         <CandidateField state={state} onExplore={explore}/>
-        {state.trialRunning&&!state.overlayVisible&&<div className="field-note" style={{pointerEvents:'none'}}>CLICK OR DRAG TO EXPLORE</div>}
+        {state.recording&&!state.overlayVisible&&state.responsePhase!=='running'&&state.responsePhase!=='queued'&&<div className="field-note" style={{pointerEvents:'none'}}>CLICK OR DRAG TO EXPLORE</div>}
         {explorationError&&<div role="alert" className="field-note">{explorationError}</div>}
         {state.response==='uncertain'&&<div className="field-note uncertain">NOT COMMITTED</div>}
         {state.responsePhase==='queued'&&<div className="field-note solving">RESPONSE RECEIVED · PREPARING DISPLAY</div>}

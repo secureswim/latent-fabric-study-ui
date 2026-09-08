@@ -70,11 +70,14 @@ export function CandidateField({state,onExplore}:{state:StudyState;onExplore?:(i
   const canvas=useRef<HTMLCanvasElement>(null),data=useLatentData();
   const latest=useRef(state);latest.current=state;
   const dragging=useRef(false);
-  const interactive=!!onExplore&&state.trialRunning&&state.recording&&!state.overlayVisible&&state.responsePhase==='idle';
+  // The participant can move through the latent space at any time while the
+  // session is recording -- before a trial starts, during a response
+  // animation, and after a response has completed.
+  const interactive=!!onExplore&&state.recording;
   const pick=(event:React.PointerEvent<HTMLCanvasElement>,finished=false)=>{
     if(!interactive)return;
     const rect=event.currentTarget.getBoundingClientRect();
-    const scale=state.viewScale||1;
+    const scale=latest.current.viewScale||1;
     const x=((event.clientX-rect.left)/rect.width-.5)/scale+.5;
     const y=((event.clientY-rect.top)/rect.height-.5)/scale+.5;
     onExplore?.(encodePosition((x-.06)/.88,1-(y-.06)/.88),finished);
@@ -99,7 +102,7 @@ export function CandidateField({state,onExplore}:{state:StudyState;onExplore?:(i
       const state=latest.current;
       const running=state.responsePhase==='running'&&state.screen==='responding';
       const animating=['queued','running'].includes(state.responsePhase);
-      const from=animating?state.responseFrom:snap(state),target=animating?state.responseTarget:snap(state);
+      const from=running?state.responseFrom:snap(state),target=running?state.responseTarget:snap(state);
       const raw=running?animationProgress(state):1,recognition=smooth(raw/.15),motion=smooth((raw-.15)/.68),settle=smooth((raw-.83)/.17);
       const focus:[number,number]=[(bounds.minX+bounds.maxX)/2,(bounds.minY+bounds.maxY)/2];
       const viewScale=animating?mix(from.viewScale||1,target.viewScale||1,running?motion:0):(state.viewScale||1);
@@ -111,7 +114,7 @@ export function CandidateField({state,onExplore}:{state:StudyState;onExplore?:(i
       for(let i=1;i<history.length;i++)path(ctx,pointFor(history[i-1]),pointFor(history[i]),1,'rgba(255,159,69,.28)');
       const start=pointFor(from.designIndex),end=pointFor(target.designIndex);
       const travelling=['navigate','broad','local','return-anchor','branch','undo','reset','timeline-branch'].includes(state.response);
-      const current=animating?{x:mix(start.x,end.x,running?motion:0),y:mix(start.y,end.y,running?motion:0)}:end;
+      const current=running&&travelling?{x:mix(start.x,end.x,motion),y:mix(start.y,end.y,motion)}:pointFor(state.designIndex);
       for(let i=0;i<from.anchors.length;i++)marker(ctx,pointFor(from.anchors[i]),'#69b9e3',5,`A${i+1}`);
       if(running){
         if(travelling&&from.designIndex!==target.designIndex)path(ctx,start,end,motion,'rgba(255,159,69,.88)',true);
@@ -135,7 +138,7 @@ export function CandidateField({state,onExplore}:{state:StudyState;onExplore?:(i
     };
     const observer=new ResizeObserver(resize);observer.observe(element);resize();paint();return()=>{observer.disconnect();cancelAnimationFrame(frame)};
   },[data]);
-  return <canvas ref={canvas} className="candidate-canvas" style={{touchAction:'none',cursor:interactive?'crosshair':'default'}} aria-label="ShapeNet latent space: click or drag to explore during an active trial" onPointerDown={e=>{if(!interactive||e.button!==0)return;e.preventDefault();dragging.current=true;e.currentTarget.setPointerCapture(e.pointerId);pick(e)}} onPointerMove={e=>{if(dragging.current)pick(e)}} onPointerUp={e=>{if(dragging.current)pick(e,true);dragging.current=false}} onPointerCancel={e=>{if(dragging.current)pick(e,true);dragging.current=false}} onLostPointerCapture={()=>{dragging.current=false}}/>;
+  return <canvas ref={canvas} className="candidate-canvas" style={{touchAction:'none',cursor:interactive?'crosshair':'default'}} aria-label="ShapeNet latent space: click or drag to explore" onPointerDown={e=>{if(!interactive||e.button!==0)return;e.preventDefault();dragging.current=true;e.currentTarget.setPointerCapture(e.pointerId);pick(e)}} onPointerMove={e=>{if(dragging.current)pick(e)}} onPointerUp={e=>{if(dragging.current)pick(e,true);dragging.current=false}} onPointerCancel={e=>{if(dragging.current)pick(e,true);dragging.current=false}} onLostPointerCapture={()=>{dragging.current=false}}/>;
 }
 
 const geometryCache=new WeakMap<LatentData,Map<number,number[]>>();

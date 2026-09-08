@@ -78,8 +78,10 @@ export async function POST(request: NextRequest) {
       const [session]=await db.select().from(studySessions).where(eq(studySessions.id,String(body.sessionId))).limit(1);
       if(!session)return NextResponse.json({error:'Session not found'},{status:404});
       const state=JSON.parse(session.stateJson);
-      if(session.status!=='active'||!state.trialRunning||!state.recording||state.overlayVisible||state.responsePhase!=='idle'||state.currentTrial!==body.currentTrial||state.trialStartedAt!==body.trialStartedAt)
-        return NextResponse.json({error:'Trial is no longer open for exploration',state},{status:409});
+      // Exploration is continuous: the participant may move at any point in the
+      // session, including between trials and while a response is animating.
+      if(session.status!=='active'||!state.recording)
+        return NextResponse.json({error:'Session is not recording',state},{status:409});
       const history=[...(state.visitedDesigns||[state.designIndex])];
       const sameGesture=typeof body.gestureId==='string'&&state.explorationGestureId===body.gestureId;
       if(sameGesture&&history.length>1)history[history.length-1]=body.designIndex;
@@ -169,7 +171,10 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'Animation is no longer current' }, { status: 409 });
     }
     if(state.responsePhase==='complete')return NextResponse.json({ok:true,state,savedAt:now});
-    const target = state.responseTarget || {};
+    // Recompute the outcome from the state as it stands now, so exploration
+    // performed while the response was playing is preserved and an anchor
+    // records wherever the cursor actually is.
+    const target = responseTarget(state, state.response) as Record<string, any>;
     const nextState = phase === 'complete' ? {
       ...state,
       viewScale:target.viewScale??state.viewScale??1,
